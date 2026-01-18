@@ -1,0 +1,1679 @@
+{
+  "﻿275980": {
+    "name": "TIGER 글로벌4차산업혁신기술(합성 H)",
+    "market": "ETF"
+  },
+  "276990": {
+    "name": "KODEX 글로벌4차산업로보틱스(합성)",
+    "market": "ETF"
+  },
+  "371450": {
+    "name": "TIGER 글로벌클라우드컴퓨팅INDXX",
+    "market": "ETF"
+  },
+  "394340": {
+    "name": "KOSEF 릭소글로벌디지털경제MSCI",
+    "market": "ETF"
+  },
+  "248270": {
+    "name": "TIGER S&P글로벌헬스케어(합성)",
+    "market": "ETF"
+  },
+  "354350": {
+    "name": "HANARO 글로벌럭셔리S&P(합성)",
+    "market": "ETF"
+  },
+  "276650": {
+    "name": "KBSTAR 글로벌4차산업IT(합성 H)",
+    "market": "ETF"
+  },
+  "276000": {
+    "name": "TIGER 글로벌자원생산기업(합성 H)",
+    "market": "ETF"
+  },
+  "394670": {
+    "name": "TIGER 글로벌리튬&2차전지SOLACTIVE(합성)",
+    "market": "ETF"
+  },
+  "269370": {
+    "name": "TIGER S&P글로벌인프라(합성)",
+    "market": "ETF"
+  },
+  "269420": {
+    "name": "KODEX S&P글로벌인프라(합성)",
+    "market": "ETF"
+  },
+  "269530": {
+    "name": "ARIRANG S&P글로벌인프라",
+    "market": "ETF"
+  },
+  "394660": {
+    "name": "TIGER 글로벌자율주행&전기차SOLACTIVE",
+    "market": "ETF"
+  },
+  "394350": {
+    "name": "KOSEF 릭소글로벌퓨처모빌리티MSCI",
+    "market": "ETF"
+  },
+  "387270": {
+    "name": "TIGER 글로벌BBIG액티브",
+    "market": "ETF"
+  },
+  "189400": {
+    "name": "ARIRANG 글로벌MSCI(합성 H)",
+    "market": "ETF"
+  },
+  "195970": {
+    "name": "ARIRANG 선진국MSCI(합성 H)",
+    "market": "ETF"
+  },
+  "251350": {
+    "name": "KODEX 선진국MSCI World",
+    "market": "ETF"
+  },
+  "329670": {
+    "name": "KODEX TRF7030",
+    "market": "ETF"
+  },
+  "329660": {
+    "name": "KODEX TRF5050",
+    "market": "ETF"
+  },
+  "321410": {
+    "name": "KODEX 멀티에셋하이인컴(H)",
+    "market": "ETF"
+  },
+  "329650": {
+    "name": "KODEX TRF3070",
+    "market": "ETF"
+  },
+  "284430": {
+    "name": "KODEX 200미국채혼합",
+    "market": "ETF"
+  },
+  "182490": {
+    "name": "TIGER 단기선진하이일드(합성 H)",
+    "market": "ETF"
+  },
+  "287180": {
+    "name": "ARIRANG 미국나스닥기술주",
+    "market": "ETF"
+  },
+  "314250": {
+    "name": "KODEX 미국FANG플러스(H)",
+    "market": "ETF"
+  },
+  "381170": {
+    "name": "TIGER 미국테크TOP10 INDXX",
+    "market": "ETF"
+  },
+  "185680": {
+    "name": "KODEX 미국S&P바이오(합성)",
+    "market": "ETF"
+  },
+  "203780": {
+    "name": "TIGER 미국나스닥바이오",
+    "market": "ETF"
+  },
+  "390390": {
+    "name": "KODEX 미국반도체MV",
+    "market": "ETF"
+  },
+  "182480": {
+    "name": "TIGER 미국MSCI리츠(합성 H)",
+    "market": "ETF"
+  },
+  "181480": {
+    "name": "KINDEX 미국다우존스리츠(합성 H)",
+    "market": "ETF"
+  },
+  "352560": {
+    "name": "KODEX 다우존스미국리츠(H)",
+    "market": "ETF"
+  },
+  "375270": {
+    "name": "KBSTAR 글로벌데이터센터리츠나스닥(합성)",
+    "market": "ETF"
+  },
+  "200030": {
+    "name": "KODEX 미국S&P산업재(합성)",
+    "market": "ETF"
+  },
+  "218420": {
+    "name": "KODEX 미국S&P에너지(합성)",
+    "market": "ETF"
+  },
+  "219390": {
+    "name": "KBSTAR 미국S&P원유생산기업(합성 H)",
+    "market": "ETF"
+  },
+  "390400": {
+    "name": "KODEX 미국스마트모빌리티S&P",
+    "market": "ETF"
+  },
+  "280320": {
+    "name": "KINDEX 미국IT인터넷S&P(합성 H)",
+    "market": "ETF"
+  },
+  "391590": {
+    "name": "KINDEX 미국스팩&IPO INDXX",
+    "market": "ETF"
+  },
+  "391600": {
+    "name": "KINDEX 미국친환경그린테마INDXX",
+    "market": "ETF"
+  },
+  "309230": {
+    "name": "KINDEX 미국WideMoat가치주",
+    "market": "ETF"
+  },
+  "213630": {
+    "name": "ARIRANG 미국다우존스고배당주(합성 H)",
+    "market": "ETF"
+  },
+  "143850": {
+    "name": "TIGER 미국S&P500선물(H)",
+    "market": "ETF"
+  },
+  "219480": {
+    "name": "KODEX 미국S&P500선물(H)",
+    "market": "ETF"
+  },
+  "269540": {
+    "name": "ARIRANG 미국S&P500(H)",
+    "market": "ETF"
+  },
+  "304940": {
+    "name": "KODEX 미국나스닥100선물(H)",
+    "market": "ETF"
+  },
+  "133690": {
+    "name": "TIGER 미국나스닥100",
+    "market": "ETF"
+  },
+  "245340": {
+    "name": "TIGER 미국다우존스30",
+    "market": "ETF"
+  },
+  "280930": {
+    "name": "KODEX 미국러셀2000(H)",
+    "market": "ETF"
+  },
+  "360750": {
+    "name": "TIGER 미국S&P500",
+    "market": "ETF"
+  },
+  "360200": {
+    "name": "KINDEX 미국S&P500",
+    "market": "ETF"
+  },
+  "367380": {
+    "name": "KINDEX 미국나스닥100",
+    "market": "ETF"
+  },
+  "368590": {
+    "name": "KBSTAR 미국나스닥100",
+    "market": "ETF"
+  },
+  "373790": {
+    "name": "KOSEF 미국방어배당성장나스닥",
+    "market": "ETF"
+  },
+  "381180": {
+    "name": "TIGER 미국필라델피아반도체나스닥",
+    "market": "ETF"
+  },
+  "379780": {
+    "name": "KBSTAR 미국S&P500",
+    "market": "ETF"
+  },
+  "379800": {
+    "name": "KODEX 미국S&P500TR",
+    "market": "ETF"
+  },
+  "379810": {
+    "name": "KODEX 미국나스닥100TR",
+    "market": "ETF"
+  },
+  "354240": {
+    "name": "KBSTAR 미국고정배당우선증권ICE TR",
+    "market": "ETF"
+  },
+  "276970": {
+    "name": "KODEX 미국S&P고배당커버드콜(합성 H)",
+    "market": "ETF"
+  },
+  "329750": {
+    "name": "TIGER 미국달러단기채권액티브",
+    "market": "ETF"
+  },
+  "332610": {
+    "name": "ARIRANG 미국단기우량회사채",
+    "market": "ETF"
+  },
+  "267440": {
+    "name": "KBSTAR 미국장기국채선물(H)",
+    "market": "ETF"
+  },
+  "304660": {
+    "name": "KODEX 미국채울트라30년선물(H)",
+    "market": "ETF"
+  },
+  "305080": {
+    "name": "TIGER 미국채10년선물",
+    "market": "ETF"
+  },
+  "308620": {
+    "name": "KODEX 미국채10년선물",
+    "market": "ETF"
+  },
+  "332620": {
+    "name": "ARIRANG 미국장기우량회사채",
+    "market": "ETF"
+  },
+  "352540": {
+    "name": "KODEX TSE일본리츠(H)",
+    "market": "ETF"
+  },
+  "195920": {
+    "name": "TIGER 일본TOPIX(합성 H)",
+    "market": "ETF"
+  },
+  "101280": {
+    "name": "KODEX 일본TOPIX100",
+    "market": "ETF"
+  },
+  "238720": {
+    "name": "KINDEX 일본Nikkei225(H)",
+    "market": "ETF"
+  },
+  "241180": {
+    "name": "TIGER 일본니케이225",
+    "market": "ETF"
+  },
+  "169950": {
+    "name": "KODEX 중국본토 A50",
+    "market": "ETF"
+  },
+  "174360": {
+    "name": "KBSTAR 중국본토대형주CSI100",
+    "market": "ETF"
+  },
+  "192090": {
+    "name": "TIGER 차이나CSI300",
+    "market": "ETF"
+  },
+  "283580": {
+    "name": "KODEX 중국본토CSI300",
+    "market": "ETF"
+  },
+  "168580": {
+    "name": "KINDEX 중국본토CSI300",
+    "market": "ETF"
+  },
+  "220130": {
+    "name": "SOL 중국본토 중소형 CSI500(합성 H)",
+    "market": "ETF"
+  },
+  "250730": {
+    "name": "KBSTAR 차이나HSCEI(H)",
+    "market": "ETF"
+  },
+  "245360": {
+    "name": "TIGER 차이나HSCEI",
+    "market": "ETF"
+  },
+  "310080": {
+    "name": "KBSTAR 중국MSCI China(H)",
+    "market": "ETF"
+  },
+  "256750": {
+    "name": "KODEX 심천ChiNext(합성)",
+    "market": "ETF"
+  },
+  "256450": {
+    "name": "ARIRANG 심천차이넥스트(합성)",
+    "market": "ETF"
+  },
+  "117690": {
+    "name": "TIGER 차이나항셍25",
+    "market": "ETF"
+  },
+  "99140": {
+    "name": "KODEX China H",
+    "market": "ETF"
+  },
+  "396520": {
+    "name": "TIGER 차이나반도체FACTSET",
+    "market": "ETF"
+  },
+  "396510": {
+    "name": "TIGER 차이나클린에너지SOLACTIVE",
+    "market": "ETF"
+  },
+  "371460": {
+    "name": "TIGER 차이나전기차SOLACTIVE",
+    "market": "ETF"
+  },
+  "371470": {
+    "name": "TIGER 차이나바이오테크SOLACTIVE",
+    "market": "ETF"
+  },
+  "371160": {
+    "name": "TIGER 차이나항셍테크",
+    "market": "ETF"
+  },
+  "372330": {
+    "name": "KODEX 차이나항셍테크",
+    "market": "ETF"
+  },
+  "371870": {
+    "name": "KINDEX 차이나항셍테크",
+    "market": "ETF"
+  },
+  "371150": {
+    "name": "KBSTAR 차이나항셍테크",
+    "market": "ETF"
+  },
+  "298770": {
+    "name": "KODEX 한국대만IT프리미어",
+    "market": "ETF"
+  },
+  "316300": {
+    "name": "KINDEX 싱가포르리츠",
+    "market": "ETF"
+  },
+  "105010": {
+    "name": "TIGER 라틴35",
+    "market": "ETF"
+  },
+  "291130": {
+    "name": "KINDEX 멕시코MSCI(합성)",
+    "market": "ETF"
+  },
+  "245710": {
+    "name": "KINDEX 베트남VN30(합성)",
+    "market": "ETF"
+  },
+  "195980": {
+    "name": "ARIRANG 신흥국MSCI(합성 H)",
+    "market": "ETF"
+  },
+  "277540": {
+    "name": "KINDEX S&P아시아TOP50",
+    "market": "ETF"
+  },
+  "245350": {
+    "name": "TIGER 유로스탁스배당30",
+    "market": "ETF"
+  },
+  "195930": {
+    "name": "TIGER 유로스탁스50(합성 H)",
+    "market": "ETF"
+  },
+  "291890": {
+    "name": "KODEX MSCI EM선물(H)",
+    "market": "ETF"
+  },
+  "256440": {
+    "name": "KINDEX 인도네시아MSCI(합성)",
+    "market": "ETF"
+  },
+  "200250": {
+    "name": "KOSEF 인도Nifty50(합성)",
+    "market": "ETF"
+  },
+  "261920": {
+    "name": "KINDEX 필리핀MSCI(합성)",
+    "market": "ETF"
+  },
+  "379790": {
+    "name": "KBSTAR 유로스탁스50(H)",
+    "market": "ETF"
+  },
+  "137610": {
+    "name": "TIGER 농산물선물Enhanced(H)",
+    "market": "ETF"
+  },
+  "271060": {
+    "name": "KODEX 3대농산물선물(H)",
+    "market": "ETF"
+  },
+  "138920": {
+    "name": "KODEX 콩선물(H)",
+    "market": "ETF"
+  },
+  "138910": {
+    "name": "KODEX 구리선물(H)",
+    "market": "ETF"
+  },
+  "160580": {
+    "name": "TIGER 구리실물",
+    "market": "ETF"
+  },
+  "132030": {
+    "name": "KODEX 골드선물(H)",
+    "market": "ETF"
+  },
+  "319640": {
+    "name": "TIGER 골드선물(H)",
+    "market": "ETF"
+  },
+  "139320": {
+    "name": "TIGER 금은선물(H)",
+    "market": "ETF"
+  },
+  "144600": {
+    "name": "KODEX 은선물(H)",
+    "market": "ETF"
+  },
+  "139310": {
+    "name": "TIGER 금속선물(H)",
+    "market": "ETF"
+  },
+  "130680": {
+    "name": "TIGER 원유선물Enhanced(H)",
+    "market": "ETF"
+  },
+  "261220": {
+    "name": "KODEX WTI원유선물(H)",
+    "market": "ETF"
+  },
+  "334690": {
+    "name": "KBSTAR 팔라듐선물(H)",
+    "market": "ETF"
+  },
+  "261240": {
+    "name": "KODEX 미국달러선물",
+    "market": "ETF"
+  },
+  "138230": {
+    "name": "KOSEF 미국달러선물",
+    "market": "ETF"
+  },
+  "292560": {
+    "name": "TIGER 일본엔선물",
+    "market": "ETF"
+  },
+  "337150": {
+    "name": "KODEX 200exTOP",
+    "market": "ETF"
+  },
+  "315930": {
+    "name": "KODEX Top5PlusTR",
+    "market": "ETF"
+  },
+  "252000": {
+    "name": "TIGER 200동일가중",
+    "market": "ETF"
+  },
+  "252650": {
+    "name": "KODEX 200동일가중",
+    "market": "ETF"
+  },
+  "295820": {
+    "name": "ARIRANG 200동일가중",
+    "market": "ETF"
+  },
+  "322150": {
+    "name": "KINDEX 스마트하이베타",
+    "market": "ETF"
+  },
+  "100910": {
+    "name": "KOSEF KRX100",
+    "market": "ETF"
+  },
+  "304760": {
+    "name": "HANARO KRX300",
+    "market": "ETF"
+  },
+  "292160": {
+    "name": "TIGER KRX300",
+    "market": "ETF"
+  },
+  "292500": {
+    "name": "SOL KRX300",
+    "market": "ETF"
+  },
+  "292190": {
+    "name": "KODEX KRX300",
+    "market": "ETF"
+  },
+  "292050": {
+    "name": "KBSTAR KRX300",
+    "market": "ETF"
+  },
+  "292730": {
+    "name": "FOCUS KRX300",
+    "market": "ETF"
+  },
+  "292750": {
+    "name": "ARIRANG KRX300",
+    "market": "ETF"
+  },
+  "292150": {
+    "name": "TIGER TOP10",
+    "market": "ETF"
+  },
+  "228820": {
+    "name": "TIGER KTOP30",
+    "market": "ETF"
+  },
+  "229720": {
+    "name": "KODEX KTOP30",
+    "market": "ETF"
+  },
+  "310970": {
+    "name": "TIGER MSCI Korea TR",
+    "market": "ETF"
+  },
+  "278540": {
+    "name": "KODEX MSCI Korea TR",
+    "market": "ETF"
+  },
+  "332940": {
+    "name": "HANARO MSCI Korea TR",
+    "market": "ETF"
+  },
+  "156080": {
+    "name": "KODEX MSCI Korea",
+    "market": "ETF"
+  },
+  "232080": {
+    "name": "TIGER 코스닥150",
+    "market": "ETF"
+  },
+  "316670": {
+    "name": "KOSEF 코스닥150",
+    "market": "ETF"
+  },
+  "229200": {
+    "name": "KODEX 코스닥 150",
+    "market": "ETF"
+  },
+  "270810": {
+    "name": "KBSTAR 코스닥150",
+    "market": "ETF"
+  },
+  "304770": {
+    "name": "HANARO 코스닥150",
+    "market": "ETF"
+  },
+  "301400": {
+    "name": "ARIRANG 코스닥150",
+    "market": "ETF"
+  },
+  "354500": {
+    "name": "KINDEX 코스닥150",
+    "market": "ETF"
+  },
+  "328370": {
+    "name": "ARIRANG 코스피TR",
+    "market": "ETF"
+  },
+  "277630": {
+    "name": "TIGER 코스피",
+    "market": "ETF"
+  },
+  "226490": {
+    "name": "KODEX 코스피",
+    "market": "ETF"
+  },
+  "305050": {
+    "name": "KINDEX 코스피",
+    "market": "ETF"
+  },
+  "302450": {
+    "name": "KBSTAR 코스피",
+    "market": "ETF"
+  },
+  "227830": {
+    "name": "ARIRANG 코스피",
+    "market": "ETF"
+  },
+  "140950": {
+    "name": "파워 코스피100",
+    "market": "ETF"
+  },
+  "159800": {
+    "name": "마이티 코스피100",
+    "market": "ETF"
+  },
+  "153270": {
+    "name": "KOSEF 코스피100",
+    "market": "ETF"
+  },
+  "237350": {
+    "name": "KODEX 코스피100",
+    "market": "ETF"
+  },
+  "310960": {
+    "name": "TIGER 200TR",
+    "market": "ETF"
+  },
+  "295040": {
+    "name": "SOL 200TR",
+    "market": "ETF"
+  },
+  "294400": {
+    "name": "KOSEF 200TR",
+    "market": "ETF"
+  },
+  "278530": {
+    "name": "KODEX 200TR",
+    "market": "ETF"
+  },
+  "332500": {
+    "name": "KINDEX 200TR",
+    "market": "ETF"
+  },
+  "332930": {
+    "name": "HANARO 200TR",
+    "market": "ETF"
+  },
+  "152870": {
+    "name": "파워 200",
+    "market": "ETF"
+  },
+  "108590": {
+    "name": "TREX 200",
+    "market": "ETF"
+  },
+  "102110": {
+    "name": "TIGER 200",
+    "market": "ETF"
+  },
+  "69660": {
+    "name": "KOSEF 200",
+    "market": "ETF"
+  },
+  "69500": {
+    "name": "KODEX 200",
+    "market": "ETF"
+  },
+  "105190": {
+    "name": "KINDEX 200",
+    "market": "ETF"
+  },
+  "148020": {
+    "name": "KBSTAR 200",
+    "market": "ETF"
+  },
+  "293180": {
+    "name": "HANARO 200",
+    "market": "ETF"
+  },
+  "152100": {
+    "name": "ARIRANG 200",
+    "market": "ETF"
+  },
+  "168300": {
+    "name": "KTOP 코스피50",
+    "market": "ETF"
+  },
+  "122090": {
+    "name": "ARIRANG 코스피50",
+    "market": "ETF"
+  },
+  "359210": {
+    "name": "KODEX 코스피TR",
+    "market": "ETF"
+  },
+  "361580": {
+    "name": "KBSTAR 200TR",
+    "market": "ETF"
+  },
+  "385720": {
+    "name": "TIMEFOLIO Kstock액티브",
+    "market": "ETF"
+  },
+  "325020": {
+    "name": "KODEX 배당가치",
+    "market": "ETF"
+  },
+  "252720": {
+    "name": "KBSTAR 모멘텀밸류",
+    "market": "ETF"
+  },
+  "333980": {
+    "name": "ARIRANG KS퀄리티가중TR",
+    "market": "ETF"
+  },
+  "275290": {
+    "name": "KODEX MSCI밸류",
+    "market": "ETF"
+  },
+  "333970": {
+    "name": "ARIRANG KS밸류가중TR",
+    "market": "ETF"
+  },
+  "227570": {
+    "name": "TIGER 우량가치",
+    "market": "ETF"
+  },
+  "244670": {
+    "name": "KODEX 밸류Plus",
+    "market": "ETF"
+  },
+  "272230": {
+    "name": "KINDEX 스마트밸류",
+    "market": "ETF"
+  },
+  "234310": {
+    "name": "KBSTAR V&S셀렉트밸류",
+    "market": "ETF"
+  },
+  "244660": {
+    "name": "KODEX 퀄리티Plus",
+    "market": "ETF"
+  },
+  "275300": {
+    "name": "KODEX MSCI퀄리티",
+    "market": "ETF"
+  },
+  "322120": {
+    "name": "KINDEX 스마트퀄리티",
+    "market": "ETF"
+  },
+  "145850": {
+    "name": "TREX 펀더멘탈 200",
+    "market": "ETF"
+  },
+  "223190": {
+    "name": "KODEX 200가치저변동",
+    "market": "ETF"
+  },
+  "143460": {
+    "name": "KINDEX 밸류대형",
+    "market": "ETF"
+  },
+  "315960": {
+    "name": "KBSTAR 대형고배당10TR",
+    "market": "ETF"
+  },
+  "277640": {
+    "name": "TIGER 코스피대형주",
+    "market": "ETF"
+  },
+  "337140": {
+    "name": "KODEX 코스피대형주",
+    "market": "ETF"
+  },
+  "391670": {
+    "name": "HK 베스트일레븐액티브",
+    "market": "ETF"
+  },
+  "395170": {
+    "name": "KODEX Fn Top10동일가중",
+    "market": "ETF"
+  },
+  "252730": {
+    "name": "KBSTAR 모멘텀로우볼",
+    "market": "ETF"
+  },
+  "333940": {
+    "name": "ARIRANG KS로우볼가중TR",
+    "market": "ETF"
+  },
+  "215620": {
+    "name": "HK S&P코리아로우볼",
+    "market": "ETF"
+  },
+  "174350": {
+    "name": "TIGER 로우볼",
+    "market": "ETF"
+  },
+  "322130": {
+    "name": "KINDEX 스마트로우볼",
+    "market": "ETF"
+  },
+  "279540": {
+    "name": "KODEX 최소변동성",
+    "market": "ETF"
+  },
+  "391680": {
+    "name": "HK 하이볼액티브",
+    "market": "ETF"
+  },
+  "333960": {
+    "name": "ARIRANG KS모멘텀가중TR",
+    "market": "ETF"
+  },
+  "275280": {
+    "name": "KODEX MSCI모멘텀",
+    "market": "ETF"
+  },
+  "147970": {
+    "name": "TIGER 모멘텀",
+    "market": "ETF"
+  },
+  "244620": {
+    "name": "KODEX 모멘텀Plus",
+    "market": "ETF"
+  },
+  "272220": {
+    "name": "KINDEX 스마트모멘텀",
+    "market": "ETF"
+  },
+  "192720": {
+    "name": "파워 고배당저변동성",
+    "market": "ETF"
+  },
+  "251590": {
+    "name": "ARIRANG 고배당저변동50",
+    "market": "ETF"
+  },
+  "104530": {
+    "name": "KOSEF 고배당",
+    "market": "ETF"
+  },
+  "279530": {
+    "name": "KODEX 고배당",
+    "market": "ETF"
+  },
+  "266160": {
+    "name": "KBSTAR 고배당",
+    "market": "ETF"
+  },
+  "270800": {
+    "name": "KBSTAR KQ고배당",
+    "market": "ETF"
+  },
+  "322410": {
+    "name": "HANARO 고배당",
+    "market": "ETF"
+  },
+  "161510": {
+    "name": "ARIRANG 고배당주",
+    "market": "ETF"
+  },
+  "210780": {
+    "name": "TIGER 코스피고배당",
+    "market": "ETF"
+  },
+  "211560": {
+    "name": "TIGER 배당성장",
+    "market": "ETF"
+  },
+  "211900": {
+    "name": "KODEX 배당성장",
+    "market": "ETF"
+  },
+  "325010": {
+    "name": "KODEX Fn성장",
+    "market": "ETF"
+  },
+  "104520": {
+    "name": "KOSEF 블루칩",
+    "market": "ETF"
+  },
+  "281990": {
+    "name": "KBSTAR 중소형고배당",
+    "market": "ETF"
+  },
+  "266550": {
+    "name": "ARIRANG 중형주저변동50",
+    "market": "ETF"
+  },
+  "333950": {
+    "name": "ARIRANG KS로우사이즈가중TR",
+    "market": "ETF"
+  },
+  "331910": {
+    "name": "KOSEF Fn중소형",
+    "market": "ETF"
+  },
+  "277650": {
+    "name": "TIGER 코스피중형주",
+    "market": "ETF"
+  },
+  "301440": {
+    "name": "ARIRANG 코스피중형주",
+    "market": "ETF"
+  },
+  "226980": {
+    "name": "KODEX 200 중소형",
+    "market": "ETF"
+  },
+  "337120": {
+    "name": "KODEX Fn멀티팩터",
+    "market": "ETF"
+  },
+  "290080": {
+    "name": "KBSTAR 200고배당커버드콜ATM",
+    "market": "ETF"
+  },
+  "137930": {
+    "name": "마이다스 200커버드콜5%OTM",
+    "market": "ETF"
+  },
+  "166400": {
+    "name": "TIGER 200커버드콜5%OTM",
+    "market": "ETF"
+  },
+  "289480": {
+    "name": "TIGER 200커버드콜ATM",
+    "market": "ETF"
+  },
+  "360150": {
+    "name": "KODEX 코스닥150롱코스피200숏선물",
+    "market": "ETF"
+  },
+  "360140": {
+    "name": "KODEX 200롱코스닥150숏선물",
+    "market": "ETF"
+  },
+  "305540": {
+    "name": "TIGER 2차전지테마",
+    "market": "ETF"
+  },
+  "305720": {
+    "name": "KODEX 2차전지산업",
+    "market": "ETF"
+  },
+  "364980": {
+    "name": "TIGER KRX2차전지K-뉴딜",
+    "market": "ETF"
+  },
+  "337160": {
+    "name": "KODEX 200ESG",
+    "market": "ETF"
+  },
+  "289260": {
+    "name": "TIGER MSCI KOREA ESG리더스",
+    "market": "ETF"
+  },
+  "289040": {
+    "name": "KODEX MSCI KOREA ESG유니버설",
+    "market": "ETF"
+  },
+  "290130": {
+    "name": "KBSTAR ESG사회책임투자",
+    "market": "ETF"
+  },
+  "278420": {
+    "name": "ARIRANG ESG우수기업",
+    "market": "ETF"
+  },
+  "285690": {
+    "name": "FOCUS ESG리더스",
+    "market": "ETF"
+  },
+  "385590": {
+    "name": "네비게이터 ESG액티브",
+    "market": "ETF"
+  },
+  "395750": {
+    "name": "ARIRANG ESG가치주액티브",
+    "market": "ETF"
+  },
+  "395760": {
+    "name": "ARIRANG ESG성장주액티브",
+    "market": "ETF"
+  },
+  "157490": {
+    "name": "TIGER 소프트웨어",
+    "market": "ETF"
+  },
+  "261060": {
+    "name": "TIGER 코스닥150IT",
+    "market": "ETF"
+  },
+  "139260": {
+    "name": "TIGER 200 IT",
+    "market": "ETF"
+  },
+  "285000": {
+    "name": "KBSTAR 200IT",
+    "market": "ETF"
+  },
+  "266370": {
+    "name": "KODEX IT",
+    "market": "ETF"
+  },
+  "326240": {
+    "name": "KBSTAR IT플러스",
+    "market": "ETF"
+  },
+  "363580": {
+    "name": "KODEX 200IT TR",
+    "market": "ETF"
+  },
+  "367740": {
+    "name": "HANARO Fn5G산업",
+    "market": "ETF"
+  },
+  "367760": {
+    "name": "KBSTAR Fn5G테크",
+    "market": "ETF"
+  },
+  "380340": {
+    "name": "KINDEX Fn5G플러스",
+    "market": "ETF"
+  },
+  "139220": {
+    "name": "TIGER 200 건설",
+    "market": "ETF"
+  },
+  "287300": {
+    "name": "KBSTAR 200건설",
+    "market": "ETF"
+  },
+  "117700": {
+    "name": "KODEX 건설",
+    "market": "ETF"
+  },
+  "300610": {
+    "name": "TIGER K게임",
+    "market": "ETF"
+  },
+  "300950": {
+    "name": "KODEX 게임산업",
+    "market": "ETF"
+  },
+  "300640": {
+    "name": "KBSTAR 게임테마",
+    "market": "ETF"
+  },
+  "364990": {
+    "name": "TIGER KRX게임K-뉴딜",
+    "market": "ETF"
+  },
+  "395280": {
+    "name": "HANARO Fn K-게임",
+    "market": "ETF"
+  },
+  "105780": {
+    "name": "KBSTAR 5대그룹주",
+    "market": "ETF"
+  },
+  "138530": {
+    "name": "TIGER LG그룹+펀더멘털",
+    "market": "ETF"
+  },
+  "213610": {
+    "name": "KODEX 삼성그룹밸류",
+    "market": "ETF"
+  },
+  "131890": {
+    "name": "KINDEX 삼성그룹동일가중",
+    "market": "ETF"
+  },
+  "108450": {
+    "name": "KINDEX 삼성그룹섹터가중",
+    "market": "ETF"
+  },
+  "138520": {
+    "name": "TIGER 삼성그룹펀더멘털",
+    "market": "ETF"
+  },
+  "102780": {
+    "name": "KODEX 삼성그룹",
+    "market": "ETF"
+  },
+  "138540": {
+    "name": "TIGER 현대차그룹+펀더멘털",
+    "market": "ETF"
+  },
+  "140700": {
+    "name": "KODEX 보험",
+    "market": "ETF"
+  },
+  "91220": {
+    "name": "TIGER 은행",
+    "market": "ETF"
+  },
+  "91170": {
+    "name": "KODEX 은행",
+    "market": "ETF"
+  },
+  "157500": {
+    "name": "TIGER 증권",
+    "market": "ETF"
+  },
+  "102970": {
+    "name": "KODEX 증권",
+    "market": "ETF"
+  },
+  "139270": {
+    "name": "TIGER 200 금융",
+    "market": "ETF"
+  },
+  "284980": {
+    "name": "KBSTAR 200금융",
+    "market": "ETF"
+  },
+  "280920": {
+    "name": "ARIRANG 주도업종",
+    "market": "ETF"
+  },
+  "322400": {
+    "name": "HANARO e커머스",
+    "market": "ETF"
+  },
+  "139280": {
+    "name": "TIGER 경기방어",
+    "market": "ETF"
+  },
+  "102960": {
+    "name": "KODEX 기계장비",
+    "market": "ETF"
+  },
+  "326230": {
+    "name": "KBSTAR 내수주플러스",
+    "market": "ETF"
+  },
+  "314700": {
+    "name": "HANARO 농업융복합산업",
+    "market": "ETF"
+  },
+  "140570": {
+    "name": "KBSTAR 수출주",
+    "market": "ETF"
+  },
+  "228800": {
+    "name": "TIGER 여행레저",
+    "market": "ETF"
+  },
+  "140580": {
+    "name": "KBSTAR 우량업종",
+    "market": "ETF"
+  },
+  "261140": {
+    "name": "TIGER 우선주",
+    "market": "ETF"
+  },
+  "140710": {
+    "name": "KODEX 운송",
+    "market": "ETF"
+  },
+  "98560": {
+    "name": "TIGER 방송통신",
+    "market": "ETF"
+  },
+  "307510": {
+    "name": "TIGER 의료기기",
+    "market": "ETF"
+  },
+  "329200": {
+    "name": "TIGER 부동산인프라고배당",
+    "market": "ETF"
+  },
+  "150460": {
+    "name": "TIGER 중국소비테마",
+    "market": "ETF"
+  },
+  "307520": {
+    "name": "TIGER 지주회사",
+    "market": "ETF"
+  },
+  "226380": {
+    "name": "KINDEX Fn성장소비주도주",
+    "market": "ETF"
+  },
+  "228790": {
+    "name": "TIGER 화장품",
+    "market": "ETF"
+  },
+  "364690": {
+    "name": "KODEX 혁신기술테마액티브",
+    "market": "ETF"
+  },
+  "373490": {
+    "name": "KODEX K-이노베이션액티브",
+    "market": "ETF"
+  },
+  "365040": {
+    "name": "TIGER AI코리아그로스액티브",
+    "market": "ETF"
+  },
+  "364960": {
+    "name": "TIGER KRX BBIG K-뉴딜",
+    "market": "ETF"
+  },
+  "385710": {
+    "name": "TIMEFOLIO BBIG액티브",
+    "market": "ETF"
+  },
+  "388280": {
+    "name": "KBSTAR Fn컨택트대표",
+    "market": "ETF"
+  },
+  "368470": {
+    "name": "KINDEX Fn K-뉴딜디지털플러스",
+    "market": "ETF"
+  },
+  "368200": {
+    "name": "KBSTAR Fn K-뉴딜디지털플러스",
+    "market": "ETF"
+  },
+  "368680": {
+    "name": "KODEX Fn K-뉴딜디지털플러스",
+    "market": "ETF"
+  },
+  "368190": {
+    "name": "HANARO Fn K-뉴딜디지털플러스",
+    "market": "ETF"
+  },
+  "266360": {
+    "name": "KODEX 미디어&엔터테인먼트",
+    "market": "ETF"
+  },
+  "228810": {
+    "name": "TIGER 미디어컨텐츠",
+    "market": "ETF"
+  },
+  "395290": {
+    "name": "HANARO Fn K-POP&미디어",
+    "market": "ETF"
+  },
+  "395150": {
+    "name": "KODEX Fn웹툰&드라마",
+    "market": "ETF"
+  },
+  "309210": {
+    "name": "ARIRANG KRX300헬스케어",
+    "market": "ETF"
+  },
+  "261070": {
+    "name": "TIGER 코스닥150바이오테크",
+    "market": "ETF"
+  },
+  "227540": {
+    "name": "TIGER 200 헬스케어",
+    "market": "ETF"
+  },
+  "244580": {
+    "name": "KODEX 바이오",
+    "market": "ETF"
+  },
+  "143860": {
+    "name": "TIGER 헬스케어",
+    "market": "ETF"
+  },
+  "266420": {
+    "name": "KODEX 헬스케어",
+    "market": "ETF"
+  },
+  "253280": {
+    "name": "KBSTAR 헬스케어",
+    "market": "ETF"
+  },
+  "364970": {
+    "name": "TIGER KRX바이오K-뉴딜",
+    "market": "ETF"
+  },
+  "91230": {
+    "name": "TIGER 반도체",
+    "market": "ETF"
+  },
+  "91160": {
+    "name": "KODEX 반도체",
+    "market": "ETF"
+  },
+  "388420": {
+    "name": "KBSTAR 비메모리반도체액티브",
+    "market": "ETF"
+  },
+  "395270": {
+    "name": "HANARO Fn K-반도체",
+    "market": "ETF"
+  },
+  "395160": {
+    "name": "KODEX Fn시스템반도체",
+    "market": "ETF"
+  },
+  "396500": {
+    "name": "TIGER Fn반도체TOP10",
+    "market": "ETF"
+  },
+  "227550": {
+    "name": "TIGER 200 산업재",
+    "market": "ETF"
+  },
+  "287320": {
+    "name": "KBSTAR 200산업재",
+    "market": "ETF"
+  },
+  "139290": {
+    "name": "TIGER 200 경기소비재",
+    "market": "ETF"
+  },
+  "287310": {
+    "name": "KBSTAR 200경기소비재",
+    "market": "ETF"
+  },
+  "266390": {
+    "name": "KODEX 경기소비재",
+    "market": "ETF"
+  },
+  "227560": {
+    "name": "TIGER 200 생활소비재",
+    "market": "ETF"
+  },
+  "287330": {
+    "name": "KBSTAR 200생활소비재",
+    "market": "ETF"
+  },
+  "266410": {
+    "name": "KODEX 필수소비재",
+    "market": "ETF"
+  },
+  "139250": {
+    "name": "TIGER 200 에너지화학",
+    "market": "ETF"
+  },
+  "284990": {
+    "name": "KBSTAR 200에너지화학",
+    "market": "ETF"
+  },
+  "117460": {
+    "name": "KODEX 에너지화학",
+    "market": "ETF"
+  },
+  "367770": {
+    "name": "KBSTAR Fn수소경제테마",
+    "market": "ETF"
+  },
+  "377990": {
+    "name": "TIGER Fn신재생에너지",
+    "market": "ETF"
+  },
+  "381570": {
+    "name": "HANARO Fn친환경에너지",
+    "market": "ETF"
+  },
+  "385510": {
+    "name": "KODEX K-신재생에너지액티브",
+    "market": "ETF"
+  },
+  "315270": {
+    "name": "TIGER 200커뮤니케이션서비스",
+    "market": "ETF"
+  },
+  "315480": {
+    "name": "KBSTAR 200커뮤니케이션서비스",
+    "market": "ETF"
+  },
+  "365000": {
+    "name": "TIGER KRX인터넷K-뉴딜",
+    "market": "ETF"
+  },
+  "91180": {
+    "name": "KODEX 자동차",
+    "market": "ETF"
+  },
+  "381560": {
+    "name": "HANARO Fn전기&수소차",
+    "market": "ETF"
+  },
+  "385520": {
+    "name": "KODEX K-미래차액티브",
+    "market": "ETF"
+  },
+  "387280": {
+    "name": "TIGER 퓨처모빌리티액티브",
+    "market": "ETF"
+  },
+  "385600": {
+    "name": "네비게이터 친환경자동차밸류체인액티브",
+    "market": "ETF"
+  },
+  "139230": {
+    "name": "TIGER 200 중공업",
+    "market": "ETF"
+  },
+  "285010": {
+    "name": "KBSTAR 200중공업",
+    "market": "ETF"
+  },
+  "139240": {
+    "name": "TIGER 200 철강소재",
+    "market": "ETF"
+  },
+  "117680": {
+    "name": "KODEX 철강",
+    "market": "ETF"
+  },
+  "285020": {
+    "name": "KBSTAR 200철강소재",
+    "market": "ETF"
+  },
+  "375770": {
+    "name": "KODEX 탄소효율그린뉴딜",
+    "market": "ETF"
+  },
+  "375760": {
+    "name": "HANARO 탄소효율그린뉴딜",
+    "market": "ETF"
+  },
+  "376410": {
+    "name": "TIGER 탄소효율그린뉴딜",
+    "market": "ETF"
+  },
+  "183710": {
+    "name": "KBSTAR 주식혼합",
+    "market": "ETF"
+  },
+  "237440": {
+    "name": "TIGER 경기방어채권혼합",
+    "market": "ETF"
+  },
+  "253290": {
+    "name": "KBSTAR 헬스케어채권혼합",
+    "market": "ETF"
+  },
+  "238670": {
+    "name": "ARIRANG 스마트베타Quality채권혼합",
+    "market": "ETF"
+  },
+  "183700": {
+    "name": "KBSTAR 채권혼합",
+    "market": "ETF"
+  },
+  "241390": {
+    "name": "KBSTAR V&S셀렉트밸류채권혼합",
+    "market": "ETF"
+  },
+  "251600": {
+    "name": "ARIRANG 고배당주채권혼합",
+    "market": "ETF"
+  },
+  "237370": {
+    "name": "KODEX 배당성장채권혼합",
+    "market": "ETF"
+  },
+  "272560": {
+    "name": "KBSTAR 단기국공채액티브",
+    "market": "ETF"
+  },
+  "157450": {
+    "name": "TIGER 단기통안채",
+    "market": "ETF"
+  },
+  "122260": {
+    "name": "KOSEF 통안채1년",
+    "market": "ETF"
+  },
+  "190620": {
+    "name": "KINDEX 단기통안채",
+    "market": "ETF"
+  },
+  "196230": {
+    "name": "KBSTAR 단기통안채",
+    "market": "ETF"
+  },
+  "363510": {
+    "name": "SOL KIS단기통안채",
+    "market": "ETF"
+  },
+  "273140": {
+    "name": "KODEX 단기변동금리부채권액티브",
+    "market": "ETF"
+  },
+  "278620": {
+    "name": "ARIRANG 단기채권액티브",
+    "market": "ETF"
+  },
+  "272580": {
+    "name": "TIGER 단기채권액티브",
+    "market": "ETF"
+  },
+  "390950": {
+    "name": "HANARO 단기채권액티브",
+    "market": "ETF"
+  },
+  "130730": {
+    "name": "KOSEF 단기자금",
+    "market": "ETF"
+  },
+  "214980": {
+    "name": "KODEX 단기채권PLUS",
+    "market": "ETF"
+  },
+  "153130": {
+    "name": "KODEX 단기채권",
+    "market": "ETF"
+  },
+  "239660": {
+    "name": "ARIRANG 우량회사채50 1년",
+    "market": "ETF"
+  },
+  "357870": {
+    "name": "TIGER CD금리투자KIS(합성)",
+    "market": "ETF"
+  },
+  "385550": {
+    "name": "KBSTAR KIS단기종합채권(AA-이상)액티브",
+    "market": "ETF"
+  },
+  "298340": {
+    "name": "ARIRANG 국채선물3년",
+    "market": "ETF"
+  },
+  "114820": {
+    "name": "TIGER 국채3년",
+    "market": "ETF"
+  },
+  "114470": {
+    "name": "KOSEF 국고채3년",
+    "market": "ETF"
+  },
+  "114260": {
+    "name": "KODEX 국고채3년",
+    "market": "ETF"
+  },
+  "114460": {
+    "name": "KINDEX 국고채3년",
+    "market": "ETF"
+  },
+  "114100": {
+    "name": "KBSTAR 국고채3년",
+    "market": "ETF"
+  },
+  "136340": {
+    "name": "KBSTAR 중기우량회사채",
+    "market": "ETF"
+  },
+  "302190": {
+    "name": "TIGER 중장기국채",
+    "market": "ETF"
+  },
+  "272910": {
+    "name": "KINDEX 중장기국공채액티브",
+    "market": "ETF"
+  },
+  "272570": {
+    "name": "KBSTAR 중장기국공채액티브",
+    "market": "ETF"
+  },
+  "397420": {
+    "name": "KBSTAR 국채선물5년추종",
+    "market": "ETF"
+  },
+  "295000": {
+    "name": "KBSTAR 국채선물10년",
+    "market": "ETF"
+  },
+  "152380": {
+    "name": "KODEX 국채선물10년",
+    "market": "ETF"
+  },
+  "289670": {
+    "name": "ARIRANG 국채선물10년",
+    "market": "ETF"
+  },
+  "148070": {
+    "name": "KOSEF 국고채10년",
+    "market": "ETF"
+  },
+  "346000": {
+    "name": "HANARO KAP초장기국고채",
+    "market": "ETF"
+  },
+  "365780": {
+    "name": "KINDEX 국고채10년",
+    "market": "ETF"
+  },
+  "385560": {
+    "name": "KBSTAR KIS국고채30년Enhanced",
+    "market": "ETF"
+  },
+  "363570": {
+    "name": "KODEX 장기종합채권(AA-이상)액티브KAP",
+    "market": "ETF"
+  },
+  "273130": {
+    "name": "KODEX 종합채권(AA-이상)액티브",
+    "market": "ETF"
+  },
+  "385540": {
+    "name": "KBSTAR KIS종합채권(A-이상)액티브",
+    "market": "ETF"
+  },
+  "336160": {
+    "name": "KBSTAR 금융채액티브",
+    "market": "ETF"
+  },
+  "356540": {
+    "name": "KINDEX KIS종합채권(AA-이상)액티브",
+    "market": "ETF"
+  },
+  "341850": {
+    "name": "TIGER KIS부동산인프라채권TR",
+    "market": "ETF"
+  },
+  "KRX:437080": {
+    "name": "KODEX 미국종합채권 SRI액티브",
+    "market": "ETF"
+  },
+  "KRX:449450": {
+    "name": "PLUS K방산",
+    "market": "ETF"
+  },
+  "KRX:465580": {
+    "name": "ACE 미국빅테크TOP7 Plus",
+    "market": "ETF"
+  },
+  "KRX:487240": {
+    "name": "KODEX AI전력핵심설비",
+    "market": "ETF"
+  },
+  "KRX:233160": {
+    "name": "TIGER 코스닥150 레버리지",
+    "market": "ETF"
+  },
+  "233160": {
+    "name": "ETF-233160",
+    "code": "233160",
+    "market": "ETF",
+    "currentPrice": 13550,
+    "change": 45,
+    "changePercent": 0.33,
+    "volume": 274701,
+    "marketCap": 894,
+    "per": 0.0,
+    "pbr": 0.0,
+    "eps": 0.0
+  }
+}

@@ -18,3 +18,9 @@ View your app in AI Studio: https://ai.studio/apps/drive/1ul6fjYPAFogIqCVmBKhE7u
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+### 서버실행
+ C:/Workspace/마이스탁/.venv/Scripts/python.exe update_stock_prices.py
+
+## 데이터 정보
+이 프로젝트에서 사용하는 주식 데이터의 상세 구조와 기간은 [DATA_README.md](DATA_README.md)를 참고하세요.
