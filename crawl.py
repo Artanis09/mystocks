@@ -28,6 +28,10 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import List, Set, Optional, Iterable, Dict, Any
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 import pandas as pd
 from tqdm import tqdm
 # pykrx 대신 KIS/fdr 활용 (safe import)
@@ -61,8 +65,8 @@ class Config:
     retry_backoff_sec: float = 0.7
 
     # KIS API 설정
-    kis_app_key: str = "PSM786MPoVa3UpQ0R51JEqEEGuldiY4JBvbs"
-    kis_app_secret: str = "6KPMpHh44nSTfvjYke2cyFz9Fiizmf5ip3Ih9QbYy7n29lpFIOgSai1V2YclrxJWU/RD9EyB24QCaweWQJMPelWrPd15fp399Fpk1ouzDWYDlbTijKMh90ALITQ+VLClrs6gVaGOpJWJ0lDlz/UR0CYc0KsqBPPhd4uoUCFJug1SRydO7KA="
+    kis_app_key: str = os.getenv("KIS_APP_KEY", "")
+    kis_app_secret: str = os.getenv("KIS_APP_SECRET", "")
     kis_token_file: str = "kis_token.json"
     kis_base_url: str = "https://openapi.koreainvestment.com:9443"
 
@@ -271,8 +275,14 @@ def prune_old_partitions(bars_dir: str, keep_days: int) -> int:
 # -----------------------------
 def load_dart_api_key() -> Optional[str]:
     """
-    config.ini에서 DART API 키 로드
+    환경변수 또는 config.ini에서 DART API 키 로드
     """
+    # 1. 환경변수 확인
+    env_key = os.getenv("DART_API_KEY")
+    if env_key:
+        return env_key
+
+    # 2. config.ini 확인
     if not os.path.exists(CFG.config_file):
         print(f"[WARN] config.ini 파일이 없습니다. DART API 기능을 사용하려면 config.ini를 생성하세요.")
         return None
@@ -699,11 +709,12 @@ def collect_bars_incremental(start_yyyymmdd: str, end_yyyymmdd: str, bars_dir: s
     existing = list_existing_partitions_dates(bars_dir)
     days_ts = business_days(start_yyyymmdd, end_yyyymmdd)
 
-    # 누락된 영업일만 대상
+    # 누락된 영업일만 대상 (오늘 날짜는 폴더가 있더라도 무조건 다시 수집하여 현재가 반영)
+    today_str = datetime.now().strftime("%Y-%m-%d")
     missing_ts: List[pd.Timestamp] = []
     for ts in days_ts:
         ds = ts.strftime("%Y-%m-%d")
-        if ds not in existing:
+        if ds not in existing or ds == today_str:
             missing_ts.append(ts)
 
     print(f"[INFO] Business days in window: {len(days_ts)}")
@@ -791,13 +802,13 @@ def collect_bars_incremental(start_yyyymmdd: str, end_yyyymmdd: str, bars_dir: s
 def main():
     latest = get_latest_business_day()
 
-    # 기존 데이터의 마지막 날짜를 찾아서 그 다음 날부터 수집 시작
+    # 기존 데이터의 마지막 날짜부터 수집 시작 (오늘 날짜의 현재가 업데이트를 위해 덮어쓰기 허용)
     existing_dates = list_existing_partitions_dates(CFG.bars_dir)
     if existing_dates:
         last_date = max(existing_dates)
-        start_dt = datetime.strptime(last_date, "%Y-%m-%d") + timedelta(days=1)
+        start_dt = datetime.strptime(last_date, "%Y-%m-%d")
         start = yyyymmdd(start_dt)
-        print(f"[INFO] Existing data up to {last_date}, starting collection from {start}")
+        print(f"[INFO] Existing data up to {last_date}, checking from {start}")
     else:
         start = compute_window_start(latest, CFG.years, CFG.buffer_days)
         print(f"[INFO] No existing data, starting from {start}")

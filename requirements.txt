@@ -1,0 +1,14 @@
+flask
+flask-sqlalchemy
+flask-cors
+pandas
+numpy
+requests
+beautifulsoup4
+python-dotenv
+catboost
+scikit-learn
+tqdm
+pyarrow
+schedule
+mojito-python

@@ -1,7 +1,23 @@
 import React, { useState, useEffect } from 'react';
-import { TrendingUp, TrendingDown, RefreshCw, DollarSign, Percent, AlertCircle, Edit2, Check, X } from 'lucide-react';
+import { TrendingUp, TrendingDown, RefreshCw, DollarSign, Percent, AlertCircle, Edit2, Check, X, LineChart as LineChartIcon } from 'lucide-react';
+import { 
+  AreaChart, 
+  Area, 
+  XAxis, 
+  YAxis, 
+  Tooltip, 
+  ResponsiveContainer,
+  CartesianGrid
+} from 'recharts';
 
 const API_BASE_URL = 'http://localhost:5000/api';
+
+interface HistoryPoint {
+  date: string;
+  returnRate: number;
+  totalValue: number;
+  totalInvested: number;
+}
 
 interface StockReturn {
   id: string;
@@ -31,7 +47,9 @@ interface PortfolioReturnsProps {
 
 export const PortfolioReturns: React.FC<PortfolioReturnsProps> = ({ groupId, groupName, onClose }) => {
   const [data, setData] = useState<GroupReturns | null>(null);
+  const [history, setHistory] = useState<HistoryPoint[]>([]);
   const [loading, setLoading] = useState(true);
+  const [historyLoading, setHistoryLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editPrice, setEditPrice] = useState<string>('');
@@ -42,7 +60,7 @@ export const PortfolioReturns: React.FC<PortfolioReturnsProps> = ({ groupId, gro
     try {
       const response = await fetch(`${API_BASE_URL}/groups/${groupId}/returns`);
       const result = await response.json();
-      if (result.success) {
+      if (result.success !== false) { // Result shape might vary
         setData(result);
       } else {
         setError(result.error || '조회안됨');
@@ -54,8 +72,24 @@ export const PortfolioReturns: React.FC<PortfolioReturnsProps> = ({ groupId, gro
     }
   };
 
+  const fetchHistory = async () => {
+    setHistoryLoading(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/groups/${groupId}/returns/history`);
+      const result = await response.json();
+      if (result.history) {
+        setHistory(result.history);
+      }
+    } catch (e) {
+      console.error('히스토리 로딩 실패:', e);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+
   useEffect(() => {
     fetchReturns();
+    fetchHistory();
   }, [groupId]);
 
   const handleEditPurchasePrice = (stockId: string, currentPrice: number) => {
@@ -139,21 +173,22 @@ export const PortfolioReturns: React.FC<PortfolioReturnsProps> = ({ groupId, gro
                 <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
                   <div>
                     <p className="text-[10px] text-slate-500 font-black uppercase mb-1">총 매입가</p>
-                    <p className="text-xl font-black text-white">{formatNumber(data.totalPurchase)}원</p>
+                    <p className="text-xl font-black text-white">{formatNumber(data.totalPurchase || (data as any).summary?.totalInvested || 0)}원</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-slate-500 font-black uppercase mb-1">현재 평가액</p>
-                    <p className="text-xl font-black text-white">{formatNumber(data.totalCurrent)}원</p>
+                    <p className="text-xl font-black text-white">{formatNumber(data.totalCurrent || (data as any).summary?.totalCurrentValue || 0)}원</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-slate-500 font-black uppercase mb-1">손익금액</p>
-                    <p className={`text-xl font-black ${data.totalCurrent - data.totalPurchase >= 0 ? 'text-point-green' : 'text-rose-400'}`}>
-                      {data.totalCurrent - data.totalPurchase >= 0 ? '+' : ''}{formatNumber(data.totalCurrent - data.totalPurchase)}원
+                    <p className={`text-xl font-black ${(data.totalCurrent || (data as any).summary?.totalCurrentValue || 0) - (data.totalPurchase || (data as any).summary?.totalInvested || 0) >= 0 ? 'text-point-green' : 'text-rose-400'}`}>
+                      {(data.totalCurrent || (data as any).summary?.totalCurrentValue || 0) - (data.totalPurchase || (data as any).summary?.totalInvested || 0) >= 0 ? '+' : ''}
+                      {formatNumber((data.totalCurrent || (data as any).summary?.totalCurrentValue || 0) - (data.totalPurchase || (data as any).summary?.totalInvested || 0))}원
                     </p>
                   </div>
                   <div className="flex items-center gap-3">
-                    <div className={`p-3 rounded-xl ${data.totalReturnPercent >= 0 ? 'bg-point-green/10' : 'bg-rose-400/10'}`}>
-                      {data.totalReturnPercent >= 0 ? (
+                    <div className={`p-3 rounded-xl ${(data.totalReturnPercent || (data as any).summary?.returnRate || 0) >= 0 ? 'bg-point-green/10' : 'bg-rose-400/10'}`}>
+                      {(data.totalReturnPercent || (data as any).summary?.returnRate || 0) >= 0 ? (
                         <TrendingUp className="w-6 h-6 text-point-green" />
                       ) : (
                         <TrendingDown className="w-6 h-6 text-rose-400" />
@@ -161,11 +196,67 @@ export const PortfolioReturns: React.FC<PortfolioReturnsProps> = ({ groupId, gro
                     </div>
                     <div>
                       <p className="text-[10px] text-slate-500 font-black uppercase mb-1">총 수익률</p>
-                      <p className={`text-2xl font-black ${data.totalReturnPercent >= 0 ? 'text-point-green' : 'text-rose-400'}`}>
-                        {data.totalReturnPercent >= 0 ? '+' : ''}{data.totalReturnPercent.toFixed(2)}%
+                      <p className={`text-2xl font-black ${(data.totalReturnPercent || (data as any).summary?.returnRate || 0) >= 0 ? 'text-point-green' : 'text-rose-400'}`}>
+                        {(data.totalReturnPercent || (data as any).summary?.returnRate || 0) >= 0 ? '+' : ''}
+                        {(data.totalReturnPercent || (data as any).summary?.returnRate || 0).toFixed(2)}%
                       </p>
                     </div>
                   </div>
+                </div>
+              </div>
+
+              {/* 수익률 추이 그래프 */}
+              <div className="mb-8 p-6 bg-[#0f121d] rounded-2xl border border-slate-700">
+                <div className="flex items-center justify-between mb-6">
+                  <div className="flex items-center gap-2">
+                    <LineChartIcon className="w-5 h-5 text-point-cyan" />
+                    <h3 className="text-lg font-black text-white uppercase tracking-wider">수익률 추이</h3>
+                  </div>
+                  {historyLoading && <RefreshCw className="w-4 h-4 text-slate-500 animate-spin" />}
+                </div>
+                <div className="h-64 w-full">
+                  {history.length > 0 ? (
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={history}>
+                        <defs>
+                          <linearGradient id="colorReturn" x1="0" y1="0" x2="0" y2="1">
+                            <stop offset="5%" stopColor="#00f2ff" stopOpacity={0.3}/>
+                            <stop offset="95%" stopColor="#00f2ff" stopOpacity={0}/>
+                          </linearGradient>
+                        </defs>
+                        <CartesianGrid strokeDasharray="3 3" stroke="#1e2336" vertical={false} />
+                        <XAxis 
+                          dataKey="date" 
+                          stroke="#475569" 
+                          fontSize={10} 
+                          tickFormatter={(str) => str.split('-').slice(1).join('/')}
+                        />
+                        <YAxis 
+                          stroke="#475569" 
+                          fontSize={10} 
+                          tickFormatter={(val) => `${val}%`}
+                        />
+                        <Tooltip 
+                          contentStyle={{ backgroundColor: '#1a1f2e', border: '1px solid #334155', borderRadius: '8px' }}
+                          labelStyle={{ color: '#94a3b8', fontWeight: 'bold' }}
+                          itemStyle={{ fontWeight: 'bold' }}
+                        />
+                        <Area 
+                          type="monotone" 
+                          dataKey="returnRate" 
+                          name="수익률"
+                          stroke="#00f2ff" 
+                          strokeWidth={3}
+                          fillOpacity={1} 
+                          fill="url(#colorReturn)" 
+                        />
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  ) : (
+                    <div className="flex items-center justify-center h-full text-slate-500 font-bold">
+                      {historyLoading ? "데이터 계산 중..." : "매매 히스토리가 부족합니다."}
+                    </div>
+                  )}
                 </div>
               </div>
 

@@ -96,6 +96,10 @@ export interface StockData {
   tradingVolume: string;
   transactionAmount: string;
   foreignOwnership: number;
+  returnRate?: number;
+  totalProfit?: number;
+  avgBuyPrice?: number;
+  remainingQuantity?: number;
   quarterlyMargins: QuarterlyMetric[];
   memos: StockMemo[];
   addedAt: string;
@@ -132,5 +136,20 @@ export interface StockGroup {
 // GroupData 별칭 (호환성)
 export type GroupData = StockGroup;
 
+export interface RecommendedStock {
+  id?: number;
+  date?: string;
+  code: string;
+  name: string;
+  // close는 base_price(추천 당시 가격)로 매핑
+  close: number;  
+  base_price?: number;
+  current_price?: number;
+  market_cap: number;
+  probability: number;
+  expected_return: number;
+  return_rate?: number;
+}
+
 // Navigation
-export type PageType = 'dashboard' | 'portfolio' | 'journal';
+export type PageType = 'dashboard' | 'portfolio' | 'journal' | 'recommendations';

@@ -1,9 +1,10 @@
 
 import React, { useState, useEffect } from 'react';
-import { StockGroup, StockData, PageType } from './types';
+import { StockGroup, StockData, PageType, RecommendedStock } from './types';
 import { Sidebar } from './components/Sidebar';
 import { Dashboard } from './components/Dashboard';
 import { JournalPage } from './components/JournalPage';
+import { Recommendations } from './components/Recommendations';
 import { StockCard } from './components/StockCard';
 import { StockDetail } from './components/StockDetail';
 import { AddStockModal } from './components/AddStockModal';
@@ -23,7 +24,7 @@ import {
 
 const API_BASE_URL = 'http://localhost:5000/api';
 
-interface GroupReturns {
+interface GroupReturnSummary {
   totalProfit: number;
   totalProfitPercent: number;
   totalCost: number;
@@ -39,11 +40,12 @@ const App: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
-  const [groupReturns, setGroupReturns] = useState<{ [key: string]: GroupReturns }>({});
+  const [groupReturns, setGroupReturns] = useState<{ [key: string]: GroupReturnSummary }>({});
+  const [selectedRecStock, setSelectedRecStock] = useState<StockData | null>(null);
 
   // 그룹별 수익률 로드
   const loadGroupReturns = async (groupIds: string[]) => {
-    const returns: { [key: string]: GroupReturns } = {};
+    const returns: { [key: string]: GroupReturnSummary } = {};
     
     await Promise.all(
       groupIds.map(async (groupId) => {
@@ -54,9 +56,10 @@ const App: React.FC = () => {
             if (data.summary) {
               returns[groupId] = {
                 totalProfit: data.summary.totalProfit || 0,
-                totalProfitPercent: data.summary.totalProfitPercent || 0,
-                totalCost: data.summary.totalCost || 0,
-                currentValue: data.summary.currentValue || 0,
+                // 백엔드에서 returnRate로 오는지 totalProfitPercent로 오는지 확인 필요
+                totalProfitPercent: data.summary.returnRate !== undefined ? data.summary.returnRate : (data.summary.totalProfitPercent || 0),
+                totalCost: data.summary.totalInvested !== undefined ? data.summary.totalInvested : (data.summary.totalCost || 0),
+                currentValue: data.summary.totalCurrentValue !== undefined ? data.summary.totalCurrentValue : (data.summary.currentValue || 0),
               };
             }
           }
@@ -212,6 +215,36 @@ const App: React.FC = () => {
     }
   };
 
+  const handleRecStockClick = (rec: RecommendedStock) => {
+    const allStocks = groups.flatMap(g => g.stocks);
+    const existing = allStocks.find(s => s.symbol === rec.code);
+    
+    if (existing) {
+      setSelectedStockId(existing.id);
+      setCurrentPage('portfolio');
+    } else {
+      const tempStock: StockData = {
+        id: `temp_${rec.code}`,
+        symbol: rec.code,
+        name: rec.name,
+        currentPrice: rec.current_price || rec.close, // 현재가가 있으면 우선 사용
+        per: 0,
+        pbr: 0,
+        eps: 0,
+        floatingShares: '0',
+        majorShareholderStake: 0,
+        marketCap: rec.market_cap.toString(),
+        tradingVolume: '0',
+        transactionAmount: '0',
+        foreignOwnership: 0,
+        quarterlyMargins: [],
+        memos: [],
+        addedAt: new Date().toISOString()
+      };
+      setSelectedRecStock(tempStock);
+    }
+  };
+
   const handleDeleteGroup = async (groupId: string) => {
     if (!confirm("이 그룹에 포함된 모든 분석 종목을 삭제하시겠습니까?")) {
       return;
@@ -346,11 +379,11 @@ const App: React.FC = () => {
                           {/* 포트폴리오 수익률 표시 */}
                           {hasReturns && (
                             <span className={`px-3 py-1 rounded-full text-sm font-bold ${
-                              returns.totalProfitPercent >= 0 
+                              (returns.totalProfitPercent || (returns as any).returnRate || 0) >= 0 
                                 ? 'bg-green-500/20 text-green-400' 
                                 : 'bg-red-500/20 text-red-400'
                             }`}>
-                              {returns.totalProfitPercent >= 0 ? '+' : ''}{returns.totalProfitPercent.toFixed(2)}%
+                              {(returns.totalProfitPercent || (returns as any).returnRate || 0) >= 0 ? '+' : ''}{(returns.totalProfitPercent || (returns as any).returnRate || 0).toFixed(2)}%
                             </span>
                           )}
                           <button onClick={() => handleEditGroupName(group.id)} className="text-slate-600 hover:text-point-cyan transition-colors">
@@ -434,6 +467,20 @@ const App: React.FC = () => {
         return renderPortfolioPage();
       case 'journal':
         return <JournalPage />;
+      case 'recommendations':
+        if (selectedRecStock) {
+          return (
+            <div className="animate-in fade-in duration-700">
+              <StockDetail 
+                stock={selectedRecStock} 
+                onBack={() => setSelectedRecStock(null)} 
+                onUpdate={() => {}} 
+                onDelete={() => setSelectedRecStock(null)}
+              />
+            </div>
+          );
+        }
+        return <Recommendations onStockClick={handleRecStockClick} />;
       default:
         return <Dashboard />;
     }
@@ -442,7 +489,14 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen flex bg-[#0f121d] text-slate-200 selection:bg-point-cyan/30">
       {/* Sidebar */}
-      <Sidebar currentPage={currentPage} onPageChange={setCurrentPage} />
+      <Sidebar 
+        currentPage={currentPage} 
+        onPageChange={(page) => {
+          setCurrentPage(page);
+          setSelectedStockId(null);
+          setSelectedRecStock(null);
+        }} 
+      />
 
       {/* Main Content */}
       <main className="flex-1 p-8 overflow-auto">

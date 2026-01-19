@@ -4,7 +4,8 @@ import {
   LayoutDashboard, 
   Briefcase, 
   BookOpen,
-  ChevronRight
+  ChevronRight,
+  Sparkles
 } from 'lucide-react';
 import { PageType } from '../types';
 
@@ -25,6 +26,12 @@ const menuItems: { id: PageType; label: string; icon: React.ReactNode; descripti
     label: '포트폴리오', 
     icon: <Briefcase className="w-5 h-5" />,
     description: '종목 분석 및 관리'
+  },
+  { 
+    id: 'recommendations', 
+    label: 'AI 투자', 
+    icon: <Sparkles className="w-5 h-5" />,
+    description: 'AI 선정 전략 종목'
   },
   { 
     id: 'journal', 

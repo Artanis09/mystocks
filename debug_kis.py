@@ -1,8 +1,12 @@
 import json
 import requests
+import os
+from dotenv import load_dotenv
 
-APP_KEY = "PSM786MPoVa3UpQ0R51JEqEEGuldiY4JBvbs"
-APP_SECRET = "6KPMpHh44nSTfvjYke2cyFz9Fiizmf5ip3Ih9QbYy7n29lpFIOgSai1V2YclrxJWU/RD9EyB24QCaweWQJMPelWrPd15fp399Fpk1ouzDWYDlbTijKMh90ALITQ+VLClrs6gVaGOpJWJ0lDlz/UR0CYc0KsqBPPhd4uoUCFJug1SRydO7KA="
+load_dotenv()
+
+APP_KEY = os.getenv("KIS_APP_KEY")
+APP_SECRET = os.getenv("KIS_APP_SECRET")
 
 def get_token():
     try:

@@ -397,28 +397,28 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
 
             {/* 주요 지표 그리드 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8 relative z-10">
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주가수익비율: 주가 / 주당순이익(EPS). 낮을수록 저평가 상태로 간주되지만 업종 평균과 비교가 필요합니다.">
                 <div className="flex items-center gap-2 mb-1">
                   <Activity className="w-3.5 h-3.5 text-point-yellow" />
                   <span className="text-[9px] text-slate-500 font-black uppercase">PER</span>
                 </div>
                 <p className="text-xl font-black text-white">{stock.per}</p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주가순자산비율: 주가 / 주당순자산가치(BPS). 1미만이면 주가가 장부상 순자산가치에도 못 미치는 저평가 상태입니다.">
                 <div className="flex items-center gap-2 mb-1">
                   <BarChart3 className="w-3.5 h-3.5 text-point-green" />
                   <span className="text-[9px] text-slate-500 font-black uppercase">PBR</span>
                 </div>
                 <p className="text-xl font-black text-white">{stock.pbr}</p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주당순이익: 당기순이익 / 발행주식수. 기업이 1주당 얼마의 수익을 창출했는지를 나타내는 지표입니다.">
                 <div className="flex items-center gap-2 mb-1">
                   <Zap className="w-3.5 h-3.5 text-point-orange" />
                   <span className="text-[9px] text-slate-500 font-black uppercase">EPS</span>
                 </div>
                 <p className="text-xl font-black text-white">{stock.eps.toLocaleString()}</p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="외국인 보유 비중: 외국인 투자자가 해당 기업의 주식을 얼마나 보유하고 있는지 나타냅니다.">
                 <div className="flex items-center gap-2 mb-1">
                   <Globe className="w-3.5 h-3.5 text-point-cyan" />
                   <span className="text-[9px] text-slate-500 font-black uppercase">Foreign</span>
@@ -428,15 +428,15 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 py-6 border-t border-slate-700/50 relative z-10 text-[11px]">
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800">
+              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="당일 거래된 주식 수와 거래 총액입니다.">
                 <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">거래 유동성</p>
                 <p className="font-extrabold text-slate-200">{stock.tradingVolume} / {stock.transactionAmount}</p>
               </div>
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800">
+              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="시장에서 실제 매매가 가능한 주식 수 비중입니다.">
                 <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">유통량</p>
                 <p className="font-extrabold text-slate-200">{stock.floatingShares}</p>
               </div>
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800">
+              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="최대주주 및 특수관계인의 지분율로, 경영권 안정 수준을 파악할 수 있습니다.">
                 <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">최대주주</p>
                 <p className="font-extrabold text-slate-200">{stock.majorShareholderStake}%</p>
               </div>

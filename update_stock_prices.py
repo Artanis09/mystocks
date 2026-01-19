@@ -1,6 +1,10 @@
 import pandas as pd
 from pykrx import stock
 from datetime import datetime, timedelta
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 import json
 import requests
 import time
@@ -10,6 +14,7 @@ from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 import os
 from pathlib import Path
+from ml.inference import run_inference
 
 try:
     import pyarrow.parquet as pq
@@ -18,6 +23,9 @@ except Exception:  # pragma: no cover
 
 app = Flask(__name__)
 CORS(app)  # 모든 도메인에서 접근 허용
+
+# 글로벌 인메모리 캐시 (KIS API 데이터용)
+_kis_api_cache = {}
 
 # SQLite 데이터베이스 설정
 import os
@@ -225,6 +233,18 @@ class Journal(db.Model):
     created_at = db.Column(db.String(50), nullable=False)
     updated_at = db.Column(db.String(50), nullable=False)
 
+# AI 추천 이력 모델
+class Recommendation(db.Model):
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    date = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    code = db.Column(db.String(20), nullable=False)
+    name = db.Column(db.String(100), nullable=False)
+    base_price = db.Column(db.Float, nullable=False)  # 추천 당시 종가
+    probability = db.Column(db.Float, default=0)
+    expected_return = db.Column(db.Float, default=0)
+    market_cap = db.Column(db.Float, default=0)
+    created_at = db.Column(db.String(50), nullable=False)
+
 # 포트폴리오 일간 수익률 히스토리 (캐싱용)
 class PortfolioHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
@@ -284,16 +304,11 @@ def init_db():
         print("데이터베이스 초기화 완료")
 
 # 한국투자증권 API 설정
-APP_KEY = "PSM786MPoVa3UpQ0R51JEqEEGuldiY4JBvbs"
-APP_SECRET = "6KPMpHh44nSTfvjYke2cyFz9Fiizmf5ip3Ih9QbYy7n29lpFIOgSai1V2YclrxJWU/RD9EyB24QCaweWQJMPelWrPd15fp399Fpk1ouzDWYDlbTijKMh90ALITQ+VLClrs6gVaGOpJWJ0lDlz/UR0CYc0KsqBPPhd4uoUCFJug1SRydO7KA="
+APP_KEY = os.getenv("KIS_APP_KEY")
+APP_SECRET = os.getenv("KIS_APP_SECRET")
 ACCESS_TOKEN = None
 TOKEN_FILE = "kis_token.json"
 
-# 한국투자증권 API 설정
-APP_KEY = "PSM786MPoVa3UpQ0R51JEqEEGuldiY4JBvbs"
-APP_SECRET = "6KPMpHh44nSTfvjYke2cyFz9Fiizmf5ip3Ih9QbYy7n29lpFIOgSai1V2YclrxJWU/RD9EyB24QCaweWQJMPelWrPd15fp399Fpk1ouzDWYDlbTijKMh90ALITQ+VLClrs6gVaGOpJWJ0lDlz/UR0CYc0KsqBPPhd4uoUCFJug1SRydO7KA="
-ACCESS_TOKEN = None
-TOKEN_FILE = "kis_token.json"
 
 def save_token(token_data):
     """토큰을 파일에 저장"""
@@ -947,9 +962,132 @@ def api_stock_info(code):
 
 # ===== 데이터베이스 API 엔드포인트들 =====
 
+@app.route('/api/recommendations', methods=['GET'])
+def get_recommendations():
+    try:
+        # DB에서 전체 히스토리 조회 (최신순 -> 기대수익률순)
+        # Recommendation.query...
+        recs = Recommendation.query.order_by(Recommendation.date.desc(), Recommendation.expected_return.desc()).all()
+        
+        # 날짜별로 그룹핑하거나, 프론트에서 할 수도 있음. 여기서는 플랫 리스트로 주고 현재가 정보를 붙임.
+        results = []
+        
+        # 현재가 조회를 위한 기초 데이터 로드 (로컬 바)
+        latest_date = get_recent_business_day()
+        local_bars = get_local_bars_for_codes(latest_date, [r.code for r in recs])
+        
+        # 오늘 날짜
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        for rec in recs:
+            code = rec.code.zfill(6)
+            
+            # 기본값: 로컬 바 가격 -> 없으면 base_price
+            current_price = 0
+            if code in local_bars:
+                current_price = local_bars[code]['close']
+            if current_price == 0:
+                current_price = rec.base_price
+                
+            # 실시간 API 가격 업데이트 (오늘자 추천이거나, 사용자 요청 시)
+            # 여기서는 모든 추천 내역에 대해 실시간 가격을 가져오면 좋겠지만 너무 느림.
+            # 하지만 사용자 경험을 위해 KIS API 호출 시도 (캐시 활용 가능하면 좋음)
+            # update_stock_prices.ts의 get_kis_realtime_price 활용
+            try:
+                # 간단한 인메모리 캐싱 (1분)
+                now_ts = time.time()
+                cached = _kis_api_cache.get(f"price_{code}")
+                if cached and (now_ts - cached['ts'] < 60):
+                    current_price = cached['price']
+                else:
+                    # KIS API 호출
+                    kis_price = get_kis_realtime_price(code)
+                    if kis_price and kis_price.get('currentPrice', 0) > 0:
+                        current_price = float(kis_price['currentPrice'])
+                        _kis_api_cache[f"price_{code}"] = {'price': current_price, 'ts': now_ts}
+            except Exception:
+                pass # KIS 실패 시 기존 가격 유지
+            
+            # 수익률 계산
+            profit_rate = 0
+            if rec.base_price > 0:
+                profit_rate = (current_price - rec.base_price) / rec.base_price * 100
+                
+            results.append({
+                'id': rec.id,
+                'date': rec.date,
+                'code': code,
+                'name': rec.name,
+                'base_price': rec.base_price,
+                'current_price': current_price,
+                'probability': rec.probability,
+                'expected_return': rec.expected_return,
+                'market_cap': rec.market_cap,
+                'return_rate': profit_rate
+            })
+            
+        return jsonify(results)
+    except Exception as e:
+        print(f"Error in getting recommendations: {e}")
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/recommendations/predict', methods=['POST'])
+def update_recommendations():
+    try:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        
+        # 이미 오늘 데이터가 있는지 확인 (강제 갱신 요청이 아니면)
+        # 여기서 강제 갱신 로직은 프론트엔드가 이 엔드포인트를 호출한다는 것 자체가 갱신 요청으로 간주
+        # 단, 중복 생성을 막기 위해 오늘자 데이터는 삭제하고 다시 생성
+        
+        Recommendation.query.filter_by(date=today_str).delete()
+        
+        # ML 추론 실행
+        print("Running AI Inference...")
+        top_candidates = run_inference(top_k=5, min_prob_threshold=0.8, save_result=True)
+        
+        if top_candidates.empty:
+            db.session.commit() # 삭제 반영
+            return jsonify({"message": "No candidates found", "count": 0, "date": today_str})
+            
+        # 종목명 매핑
+        from ml.inference import get_stock_name_mapping
+        name_map = get_stock_name_mapping()
+        
+        new_recs = []
+        now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for _, row in top_candidates.iterrows():
+            code = str(row['code']).zfill(6)
+            name = name_map.get(code, code)
+            
+            rec = Recommendation(
+                date=today_str,
+                code=code,
+                name=name,
+                base_price=float(row['close']),
+                probability=float(row['positive_proba']),
+                expected_return=float(row['expected_return']),
+                market_cap=float(row['market_cap']),
+                created_at=now_ts
+            )
+            db.session.add(rec)
+            new_recs.append(rec)
+            
+        db.session.commit()
+        
+        return jsonify({"message": "Prediction complete", "count": len(new_recs), "date": today_str})
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error in running prediction: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/api/groups', methods=['GET'])
 def get_groups():
-    """모든 그룹과 주식 데이터 조회"""
+    """모든 그룹과 주식 데이터 조회 (성능 최적화 버전)"""
     try:
         groups = Group.query.all()
 
@@ -959,14 +1097,28 @@ def get_groups():
         tickers = load_local_tickers()
 
         all_codes = []
+        all_stock_ids = []
         for g in groups:
             for s in g.stocks:
                 if s.symbol:
                     all_codes.append(str(s.symbol).zfill(6))
+                    all_stock_ids.append(s.id)
 
         local_bars_map = get_local_bars_for_codes(business_day, all_codes) if all_codes else {}
+        
+
+        # 모든 거래 내역 한꺼번에 조회 (성능 최적화)
+        all_trades = Trade.query.filter(Trade.stock_id.in_(all_stock_ids)).all() if all_stock_ids else []
+        trades_by_stock = {}
+        for t in all_trades:
+            if t.stock_id not in trades_by_stock:
+                trades_by_stock[t.stock_id] = []
+            trades_by_stock[t.stock_id].append(t)
 
         result = []
+        
+        # 전역 캐시 사용
+        global _kis_api_cache
         
         for group in groups:
             stocks = []
@@ -974,21 +1126,32 @@ def get_groups():
                 code = str(stock.symbol).zfill(6)
                 merged = merged_stock_info(code, business_day, fundamentals, local_bars_map, tickers)
                 
-                # KIS 실시간 데이터로 업데이트 (PER, PBR, EPS, 현재가, 외인비율 등)
-                kis_realtime = get_kis_realtime_price(code)
-                if kis_realtime:
-                    # KIS 데이터가 있으면 병합 (KIS가 우선)
-                    # Use key presence (not truthiness) so zero values are preserved
-                    for key in ['currentPrice', 'per', 'pbr', 'eps', 'volume', 'marketCap', 'foreignOwnership', 'change', 'changePercent', 'high', 'low', 'open']:
-                        if key in kis_realtime and kis_realtime.get(key) is not None:
-                            merged[key] = kis_realtime[key]
-                
                 memos = [{'id': m.id, 'content': m.content, 'created_at': m.created_at} for m in stock.memos]
 
                 # UI(StockData) shape: keep values stable across reloads
                 current_price = merged.get('currentPrice', stock.price) or 0
                 volume = merged.get('volume', stock.volume) or 0
                 market_cap = merged.get('marketCap', stock.market_cap) or 0
+
+                # 수익률 계산 (매수/매도 기록 기반)
+                trades = trades_by_stock.get(stock.id, [])
+                buy_qty = sum(t.quantity for t in trades if t.trade_type == 'buy')
+                buy_amt = sum(t.quantity * t.price for t in trades if t.trade_type == 'buy')
+                sell_qty = sum(t.quantity for t in trades if t.trade_type == 'sell')
+                sell_amt = sum(t.quantity * t.price for t in trades if t.trade_type == 'sell')
+                
+                remaining = buy_qty - sell_qty
+                avg_price = buy_amt / buy_qty if buy_qty > 0 else 0
+                
+                return_rate = 0
+                total_profit = 0
+                if buy_qty > 0:
+                    current_val = remaining * current_price
+                    invested = remaining * avg_price
+                    realized = sell_amt - (sell_qty * avg_price) if sell_qty > 0 else 0
+                    unrealized = current_val - invested
+                    total_profit = realized + unrealized
+                    return_rate = (total_profit / buy_amt * 100) if buy_amt > 0 else 0
 
                 q_margins = merged.get('quarterlyMargins', [])
                 if not isinstance(q_margins, list):
@@ -1003,23 +1166,92 @@ def get_groups():
                 except Exception:
                     major_stake = 0.0
 
+
+                # 로컬에 없으면 stock.per 등 DB값 쓰는데 혹시 0이면 merged(stock_fundamentals.json) 확인
+                per_val = float(merged.get('per', stock.per) or 0)
+                pbr_val = float(merged.get('pbr', stock.pbr) or 0)
+                eps_val = float(merged.get('eps', stock.eps) or 0)
+                foreign_val = float(merged.get('foreignOwnership', getattr(stock, 'foreign_ownership', 0)) or 0)
+                
+                # ------ KIS API Fallback & Caching Logic ------
+                # DB/Local 값이 모두 0인 경우, KIS API 호출 시도하여 보완
+                # 매번 호출하면 느리므로 메모리 캐시(_kis_api_cache) 우선 확인
+                # 캐시에도 없으면 호출 후 캐시 및 DB 업데이트
+                
+                is_missing_data = (per_val == 0 and pbr_val == 0) # 주요 지표 누락 기준
+                
+                if is_missing_data:
+                    # 1. Check Memory Cache
+                    cache_key = f"{code}_{business_day}"
+                    cached_data = _kis_api_cache.get(cache_key)
+                    
+                    if cached_data:
+                        # 캐시된 데이터 사용 (0이 아닌 값만)
+                        per_val = cached_data.get('per', per_val)
+                        pbr_val = cached_data.get('pbr', pbr_val)
+                        eps_val = cached_data.get('eps', eps_val)
+                        foreign_val = cached_data.get('foreignOwnership', foreign_val)
+                        if cached_data.get('marketCap'): market_cap = cached_data.get('marketCap')
+                    
+                    # 2. Still missing? Call API
+                    if per_val == 0 and pbr_val == 0:
+                        # API 호출 (타임아웃 짧게 설정 권장하나 여기선 기본값)
+                        # get_kis_realtime_price 내부적으로 토큰 체크 등을 수행함
+                        try:
+                            kis_data = get_kis_realtime_price(code)
+                            if kis_data:
+                                # Update variables
+                                if kis_data.get('per'): per_val = float(kis_data['per'])
+                                if kis_data.get('pbr'): pbr_val = float(kis_data['pbr'])
+                                if kis_data.get('eps'): eps_val = float(kis_data['eps'])
+                                if kis_data.get('foreignOwnership'): foreign_val = float(kis_data['foreignOwnership'])
+                                if kis_data.get('marketCap'): market_cap = str(kis_data['marketCap'])
+                                
+                                # Update DB (Persistence)
+                                stock.per = per_val
+                                stock.pbr = pbr_val
+                                stock.eps = eps_val
+                                stock.market_cap = int(float(market_cap or 0))
+                                # foreignOwnership은 DB 컬럼 없음 -> 캐시에만 의존
+                                
+                                db.session.add(stock) # mark as dirty
+                                
+                                # Update Cache
+                                _kis_api_cache[cache_key] = {
+                                    'per': per_val,
+                                    'pbr': pbr_val,
+                                    'eps': eps_val,
+                                    'foreignOwnership': foreign_val,
+                                    'marketCap': market_cap
+                                }
+                        except Exception as e:
+                            print(f"KIS API Fallback failed for {code}: {e}")
+                
+                # -----------------------------------------------
+
                 stocks.append({
                     'id': stock.id,
                     'symbol': code,
                     'name': merged.get('name') or stock.name,
                     'currentPrice': float(current_price),
-                    'per': float(merged.get('per', stock.per) or 0),
-                    'pbr': float(merged.get('pbr', stock.pbr) or 0),
-                    'eps': float(merged.get('eps', stock.eps) or 0),
+                    'per': per_val,
+                    'pbr': pbr_val,
+                    'eps': eps_val,
                     'floatingShares': str(merged.get('floatingShares', '0')),
                     'majorShareholderStake': major_stake,
                     'marketCap': str(market_cap),
                     'tradingVolume': str(volume),
                     'transactionAmount': str(merged.get('transactionAmount', merged.get('value', '0')) or '0'),
-                    'foreignOwnership': float(merged.get('foreignOwnership', 0) or 0),
+                    'foreignOwnership': foreign_val,
                     'quarterlyMargins': q_margins,
                     'memos': [{'id': m['id'], 'date': m['created_at'], 'content': m['content']} for m in memos],
                     'addedAt': stock.added_at,
+                    
+                    # 수익률 정보 추가
+                    'returnRate': return_rate,
+                    'totalProfit': total_profit,
+                    'avgBuyPrice': avg_price,
+                    'remainingQuantity': remaining,
 
                     # Backward/compat fields still used by some UI calls
                     'price': float(current_price),
@@ -1036,8 +1268,16 @@ def get_groups():
                 'stocks': stocks
             })
         
+        # 변경된 주식 정보 저장 (PER, PBR 등의 업데이트)
+        try:
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
         return jsonify(result)
     except Exception as e:
+        app.logger.error(f"Error in get_groups: {str(e)}")
+        return jsonify({"error": str(e)}), 500
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/groups', methods=['POST'])
@@ -1788,11 +2028,18 @@ def get_stock_returns(stock_id):
 
 @app.route('/api/groups/<group_id>/returns', methods=['GET'])
 def get_group_returns(group_id):
-    """그룹 전체의 수익률 계산"""
+    """그룹 전체의 수익률 계산 (성능 최적화 버전)"""
     try:
         group = Group.query.get(group_id)
         if not group:
             return jsonify({"error": "그룹을 찾을 수 없습니다"}), 404
+        
+        # 모든 종목의 심볼 수집
+        stock_codes = [str(s.symbol).zfill(6) for s in group.stocks]
+        
+        # 현재 시장가 정보 한꺼번에 가져오기 (실시간 대신 로컬 데이터 활용하여 성능 향상)
+        business_day = get_recent_business_day()
+        local_prices = get_local_bars_for_codes(business_day, stock_codes)
         
         stocks_returns = []
         total_invested = 0
@@ -1800,9 +2047,20 @@ def get_group_returns(group_id):
         total_realized = 0
         total_unrealized = 0
         
+        # 모든 거래 내역 한꺼번에 조회 (성능 최적화)
+        stock_ids = [s.id for s in group.stocks]
+        all_trades = Trade.query.filter(Trade.stock_id.in_(stock_ids)).all()
+        trades_by_stock = {}
+        for t in all_trades:
+            if t.stock_id not in trades_by_stock:
+                trades_by_stock[t.stock_id] = []
+            trades_by_stock[t.stock_id].append(t)
+        
         for stock in group.stocks:
-            trades = Trade.query.filter_by(stock_id=stock.id).all()
-            
+            trades = trades_by_stock.get(stock.id, [])
+            if not trades:
+                continue
+                
             buy_qty = sum(t.quantity for t in trades if t.trade_type == 'buy')
             buy_amt = sum(t.quantity * t.price for t in trades if t.trade_type == 'buy')
             sell_qty = sum(t.quantity for t in trades if t.trade_type == 'sell')
@@ -1812,8 +2070,12 @@ def get_group_returns(group_id):
             avg_price = buy_amt / buy_qty if buy_qty > 0 else 0
             
             code = str(stock.symbol).zfill(6)
-            kis_data = get_kis_realtime_price(code)
-            current_price = kis_data.get('currentPrice', stock.price) or 0
+            
+            # 로컬 데이터에 있으면 사용, 없으면 Stock DB의 가격 사용 (KIS 개별 호출 지양)
+            if code in local_prices:
+                current_price = local_prices[code]['close']
+            else:
+                current_price = stock.price or 0
             
             current_val = remaining * current_price
             invested = remaining * avg_price
@@ -1862,110 +2124,117 @@ def get_group_returns(group_id):
 
 @app.route('/api/groups/<group_id>/returns/history', methods=['GET'])
 def get_group_returns_history(group_id):
-    """포트폴리오 수익률 히스토리 조회 (캐싱 + 신규 날짜만 계산)"""
+    """포트폴리오 수익률 히스토리 조회 (최초 매수일부터 현재까지)"""
     try:
         group = db.session.get(Group, group_id)
         if not group:
-            return jsonify({"error": "그룹을 찾을 수 없습니다"}), 404
+            return jsonify({"history": []})
         
-        # 그룹 생성일 파싱
-        group_date = group.date[:10] if group.date else None
-        if not group_date:
-            return jsonify({"error": "그룹 생성일을 찾을 수 없습니다"}), 400
+        # 1. 모든 거래 내역 수집 및 최초 매수일 확인
+        stock_ids = [s.id for s in group.stocks]
+        all_trades = Trade.query.filter(Trade.stock_id.in_(stock_ids)).order_by(Trade.trade_date).all()
         
-        # 그룹 내 종목들의 심볼 수집
-        stock_codes = [str(s.symbol).zfill(6) for s in group.stocks]
-        if not stock_codes:
-            return jsonify({"history": [], "message": "종목이 없습니다"})
+        if not all_trades:
+            return jsonify({"history": [], "message": "거래 내역이 없습니다"})
+            
+        first_trade_date = all_trades[0].trade_date[:10]
         
-        # 기존 캐시된 히스토리 조회
+        # 2. 기존 캐시된 히스토리 조회
         existing_history = PortfolioHistory.query.filter_by(group_id=group_id).order_by(PortfolioHistory.date).all()
         cached_dates = {h.date for h in existing_history}
         
-        # 각 종목별 매수 정보 계산 (그룹 생성일 기준)
-        stock_trades = {}
-        for stock in group.stocks:
-            trades = Trade.query.filter_by(stock_id=stock.id).all()
-            buy_qty = sum(t.quantity for t in trades if t.trade_type == 'buy')
-            buy_amt = sum(t.quantity * t.price for t in trades if t.trade_type == 'buy')
-            sell_qty = sum(t.quantity for t in trades if t.trade_type == 'sell')
-            
-            remaining = buy_qty - sell_qty
-            avg_price = buy_amt / buy_qty if buy_qty > 0 else 0
-            
-            if remaining > 0:
-                code = str(stock.symbol).zfill(6)
-                stock_trades[code] = {
-                    'remaining': remaining,
-                    'avg_price': avg_price,
-                    'invested': remaining * avg_price
-                }
-        
-        if not stock_trades:
-            return jsonify({"history": [{"date": h.date, "returnRate": h.return_rate, "totalValue": h.total_value, "totalInvested": h.total_invested} for h in existing_history]})
-        
-        # 사용 가능한 날짜 목록 가져오기 (parquet 디렉토리)
+        # 3. 계산해야 할 날짜 목록 (데이터가 있는 날짜 중 최초 매수일 이후)
         bars_dir = Path("data/krx/bars")
         available_dates = []
         if bars_dir.exists():
             for d in bars_dir.iterdir():
                 if d.is_dir() and d.name.startswith("date="):
-                    date_str = d.name.replace("date=", "")
-                    if date_str >= group_date:
-                        available_dates.append(date_str)
+                    date_val = d.name.replace("date=", "")
+                    if date_val >= first_trade_date:
+                        available_dates.append(date_val)
         available_dates.sort()
         
-        # 새로 계산해야 할 날짜들
         new_dates = [d for d in available_dates if d not in cached_dates]
         
-        # 새 날짜들에 대해 수익률 계산
-        for date_str in new_dates:
-            date_dir = bars_dir / f"date={date_str}"
-            parquet_file = date_dir / "data.parquet"
-            
-            if not parquet_file.exists():
-                continue
-            
-            try:
-                pf = ParquetFile(str(parquet_file))
-                df = pf.to_pandas()
-                
-                # 종목코드 정규화
-                if 'code' in df.columns:
-                    df['code'] = df['code'].astype(str).str.zfill(6)
-                
-                total_invested = 0
-                total_value = 0
-                
-                for code, info in stock_trades.items():
-                    if 'code' in df.columns:
-                        row = df[df['code'] == code]
-                        if not row.empty:
-                            close_price = row.iloc[0].get('close', 0)
-                            total_value += info['remaining'] * close_price
-                            total_invested += info['invested']
-                
-                if total_invested > 0:
-                    return_rate = ((total_value - total_invested) / total_invested) * 100
+        if new_dates:
+            # 4. 각 날짜별 보유 현황 및 수익률 계산
+            # 성능을 위해 반복문 밖에서 로직 최적화
+            for date_str in new_dates:
+                # 해당 날짜까지의 거래 내역으로 보유량/원금 계산
+                current_holdings = {} # code -> {'qty': 0, 'cost': 0}
+                for t in all_trades:
+                    if t.trade_date[:10] > date_str:
+                        break
                     
-                    # 히스토리 저장
+                    # stock_id에 해당하는 symbol 찾기
+                    s_obj = next((s for s in group.stocks if s.id == t.stock_id), None)
+                    if not s_obj: continue
+                    code = str(s_obj.symbol).zfill(6)
+                    
+                    if code not in current_holdings:
+                        current_holdings[code] = {'qty': 0, 'cost': 0}
+                    
+                    if t.trade_type == 'buy':
+                        current_holdings[code]['qty'] += t.quantity
+                        current_holdings[code]['cost'] += t.quantity * t.price
+
+                    else: # sell (선입선출 혹은 단순 평균단가 적용 - 여기서는 단순 비율 차감)
+                        if current_holdings[code]['qty'] > 0:
+                            avg_p = current_holdings[code]['cost'] / current_holdings[code]['qty']
+                            current_holdings[code]['cost'] -= t.quantity * avg_p
+                            current_holdings[code]['qty'] -= t.quantity
+                
+                # 해당 날짜의 종가 데이터 로드
+                # _read_bars_partition_df 는 캐싱이 적용되어 있음
+                bars_df = _read_bars_partition_df(date_str.replace("-", ""))
+                if bars_df is None or bars_df.empty:
+                    continue
+                
+                weighted_return_sum = 0
+                total_weight = 0
+                total_current_value_sum = 0
+                
+                for code, info in current_holdings.items():
+                    if info['qty'] <= 0: continue
+                    
+                    invested = info['cost']
+                    current_val = invested # 기본값
+                    
+                    # bars_df에서 종가 찾기
+                    if bars_df is not None and not bars_df.empty:
+                        row = bars_df[bars_df['code'] == code]
+                        if not row.empty:
+                            price = float(row.iloc[0]['close'])
+                            current_val = info['qty'] * price
+                    
+                    # 개별 자산 수익률 (Ri = (Current - Invested) / Invested * 100)
+                    r_i = ((current_val - invested) / invested * 100) if invested > 0 else 0
+                    
+                    # 자산 비중 (wi) - 사용자 요청 공식 (w1R1 + ... wnRn)/(w1 + ... wn) 
+                    # 여기서 비중 w는 매입 금액(invested)을 사용하여 투자금 대비 수익률 영향도를 측정
+                    w_i = invested
+                    
+                    weighted_return_sum += w_i * r_i
+                    total_weight += w_i
+                    total_current_value_sum += current_val
+                
+                if total_weight > 0:
+                    # 포트폴리오 가중 평균 수익률
+                    final_return_rate = weighted_return_sum / total_weight
+                    
                     history_entry = PortfolioHistory(
                         group_id=group_id,
                         date=date_str,
-                        total_invested=total_invested,
-                        total_value=total_value,
-                        return_rate=return_rate,
+                        total_invested=total_weight,
+                        total_value=total_current_value_sum,
+                        return_rate=final_return_rate,
                         created_at=datetime.now().isoformat()
                     )
                     db.session.add(history_entry)
-                    
-            except Exception as e:
-                print(f"날짜 {date_str} 처리 오류: {e}")
-                continue
-        
-        db.session.commit()
-        
-        # 전체 히스토리 반환
+            
+            db.session.commit()
+
+        # 5. 전체 히스토리 다시 조회하여 반환
         all_history = PortfolioHistory.query.filter_by(group_id=group_id).order_by(PortfolioHistory.date).all()
         result = [
             {

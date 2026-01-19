@@ -1,5 +1,6 @@
 import Papa from 'papaparse';
 import { ratio } from 'fuzzball';
+import { RecommendedStock } from '../types';
 
 export interface StockBasicInfo {
   code: string;
@@ -34,6 +35,18 @@ export interface StockDetailInfo {
 
 const STOCK_CACHE_KEY = 'stock_details_cache';
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24시간
+const API_BASE_URL = 'http://localhost:5000/api';
+
+export const getRecommendations = async (): Promise<RecommendedStock[]> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/recommendations`);
+    if (!response.ok) throw new Error('Failed to fetch recommendations');
+    return await response.json();
+  } catch (error) {
+    console.error('Recommendations load error:', error);
+    return [];
+  }
+};
 
 let stockList: StockBasicInfo[] = [];
 let etfList: { code: string; name: string }[] = [];  // ETF 전용 리스트

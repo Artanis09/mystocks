@@ -128,17 +128,16 @@ export const StockCard: React.FC<StockCardProps> = ({ stock, onClick, onDelete }
       </div>
 
       <div className="flex items-center justify-between pt-4 border-t border-slate-700/50 relative z-10">
-        <div className="flex items-center gap-3">
-          <div className={`flex items-center gap-1.5 text-[11px] font-black ${isProfitable ? 'text-point-green' : 'text-rose-400'}`}>
-            {isProfitable ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
-            {latestMargin}%
+        <div className="flex items-center gap-4">
+          <div className={`flex items-center gap-1.5 text-[12px] font-black ${ (stock.returnRate || 0) >= 0 ? 'text-rose-400' : 'text-blue-400'}`}>
+            {(stock.returnRate || 0) >= 0 ? <TrendingUp className="w-3.5 h-3.5" /> : <TrendingDown className="w-3.5 h-3.5" />}
+            {(stock.returnRate || 0).toFixed(2)}%
           </div>
-          <div className="flex items-center gap-1 text-[11px] text-slate-400 font-bold">
-            <Users className="w-3.5 h-3.5 text-point-cyan" />
-            {stock.foreignOwnership}%
+          <div className={`flex items-center gap-1 text-[11px] font-bold ${(stock.totalProfit || 0) >= 0 ? 'text-rose-400' : 'text-blue-400'}`}>
+            {(stock.totalProfit || 0).toLocaleString()}원
           </div>
         </div>
-        <div className="flex items-center justify-center bg-slate-700 text-white text-[10px] font-black w-6 h-6 rounded-full">
+        <div className="flex items-center justify-center bg-slate-700 text-white text-[10px] font-black w-6 h-6 rounded-full" title="메모 개수">
           {stock.memos.length}
         </div>
       </div>
