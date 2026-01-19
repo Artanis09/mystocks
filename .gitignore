@@ -32,3 +32,10 @@ ml/results/
 ml/predictions/
 ml/features/
 catboost_info/
+
+# Python cache & Artifacts
+__pycache__/
+*.py[cod]
+kis_token.json
+mystock.db
+instance/
