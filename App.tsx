@@ -32,7 +32,7 @@ interface GroupReturnSummary {
 }
 
 const App: React.FC = () => {
-  const [currentPage, setCurrentPage] = useState<PageType>('dashboard');
+  const [currentPage, setCurrentPage] = useState<PageType>('recommendations');
   const [groups, setGroups] = useState<StockGroup[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);

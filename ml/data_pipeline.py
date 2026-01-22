@@ -142,14 +142,23 @@ def compute_technical_indicators(df: pd.DataFrame) -> pd.DataFrame:
 
 def create_target(df: pd.DataFrame) -> pd.DataFrame:
     """
-    타겟 변수 생성: 다음날 수익률 기반 다중 클래스
+    타겟 변수 생성:
+    - target: 다음날 수익률 기반 다중 클래스 (model1)
+    - target_5d_15p: 5거래일 내 15% 이상 상승 여부 (model4)
     """
     df = df.copy()
     
-    # 다음날 종가 수익률
+    # 다음날 종가 수익률 (model1, 2, 3용)
     df['next_return'] = df.groupby('code')['close'].shift(-1) / df['close'] - 1
     
-    # 다중 클래스 레이블 생성
+    # model4: 5거래일 내 15% 이상 상승 (t+1 ~ t+5 종가 기준)
+    # shift(-5).rolling(5).max()는 t+1, t+2, t+3, t+4, t+5 중 최댓값을 가져옴
+    df['max_ret_5d'] = df.groupby('code')['close'].transform(
+        lambda x: x.shift(-5).rolling(window=5).max() / x - 1
+    )
+    df['target_5d_15p'] = (df['max_ret_5d'] >= 0.15).astype(int)
+
+    # 다중 클래스 레이블 생성 (model1)
     df['target'] = pd.cut(
         df['next_return'],
         bins=CFG.target_bins,

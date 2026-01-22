@@ -39,3 +39,6 @@ __pycache__/
 kis_token.json
 mystock.db
 instance/
+data/*
+backtest*.py
+*.zip

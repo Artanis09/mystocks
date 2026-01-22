@@ -1,882 +1,641 @@
 # -*- coding: utf-8 -*-
-"""
-KRX 전 종목 일봉 데이터 수집 프레임워크 (Parquet 날짜 파티션 + tqdm + 3년+버퍼 유지)
+"""crawl.py
+
+KRX 일봉 데이터 수집 프레임워크 (병렬 처리 버전)
+
 - 저장: data/krx/bars/date=YYYY-MM-DD/part-0000.parquet
-- 진행바: tqdm (누락 영업일 기준)
-- 기간: 최근 3년 + 버퍼(기본 180일) 유지, 그 이전 파티션 자동 삭제
-- 재실행: 파티션 존재 여부 확인 후 누락 영업일만 증분 수집
-- 마스터: tickers.parquet 저장 (code, name, market)
-
-[안전 패치]
-- pykrx의 get_previous_business_days 반환 타입이 환경에 따라 str/datetime/Timestamp 혼재 가능
-- business_days()에서 즉시 pd.Timestamp로 정규화하여 downstream에서 타입 오류 방지
-
-Requirements:
-  pip install pykrx pandas pyarrow tqdm
+- EOD(장마감 후): 전체 종목 수집 + 시총 500억 유니버스 캐시 생성
+- Intraday(장중): 유니버스(시총 500억)만 빠르게 업데이트(merge 권장)
 """
 
-from __future__ import annotations
-
-import os
-import re
-import time
-import shutil
+import argparse
 import json
-import configparser
-import requests
-from dataclasses import dataclass
+import os
+import time
+import pandas as pd
+import numpy as np
+import FinanceDataReader as fdr
 from datetime import datetime, timedelta
-from typing import List, Set, Optional, Iterable, Dict, Any
+from concurrent.futures import ThreadPoolExecutor, as_completed
+# from tqdm import tqdm # Original import
+# Fallback for tqdm if not installed or to avoid issues in some envs
+try:
+    from tqdm import tqdm
+except ImportError:
+    def tqdm(iterable, **kwargs): return iterable
 
 from dotenv import load_dotenv
+import requests
 
 load_dotenv()
 
-import pandas as pd
-from tqdm import tqdm
-# pykrx 대신 KIS/fdr 활용 (safe import)
-try:
-    import FinanceDataReader as fdr
-except ImportError:
-    fdr = None
 
-# from pykrx import stock  # 더 이상 사용하지 않음
+# -----------------------------
+# 네트워크 체크 유틸리티
+# -----------------------------
+def check_network_connection(timeout: int = 5) -> bool:
+    """인터넷 연결 확인 (여러 호스트 시도)"""
+    hosts = [
+        "https://www.naver.com",
+        "https://www.google.com",
+        "https://finance.yahoo.com"
+    ]
+    for host in hosts:
+        try:
+            requests.get(host, timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
 
+
+def wait_for_network(max_wait_seconds: int = 300, check_interval: int = 10) -> bool:
+    """네트워크 연결 대기 (최대 max_wait_seconds 동안)"""
+    start = time.time()
+    while time.time() - start < max_wait_seconds:
+        if check_network_connection():
+            return True
+        print(f"[Network] Waiting for connection... (elapsed: {int(time.time() - start)}s)")
+        time.sleep(check_interval)
+    return False
+
+
+def _atomic_to_parquet(df: pd.DataFrame, out_path: str) -> None:
+    """Write parquet atomically to avoid partially-written/corrupted files."""
+    tmp_path = out_path + ".tmp"
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, out_path)
+
+
+def _normalize_bars_df(df: pd.DataFrame, df_krx: pd.DataFrame | None = None) -> pd.DataFrame:
+    """Normalize and validate bars dataframe schema.
+
+    Ensures required columns exist and `code` is present.
+    If `code` is missing but `name` exists, it attempts to recover `code` via KRX listing mapping.
+    """
+    if df is None or df.empty:
+        raise ValueError("bars dataframe is empty")
+
+    out = df.copy()
+    # normalize column names
+    out.columns = [str(c).lower() for c in out.columns]
+    if 'code' not in out.columns:
+        # try common alternatives
+        if 'Code' in df.columns:
+            out = out.rename(columns={'Code': 'code'})
+        elif '단축코드' in df.columns:
+            out = out.rename(columns={'단축코드': 'code'})
+
+    if 'code' not in out.columns:
+        if 'name' in out.columns and df_krx is not None and not df_krx.empty:
+            # recover by name mapping (best-effort)
+            tmp = df_krx.copy()
+            if 'Code' in tmp.columns and 'Name' in tmp.columns:
+                tmp['Code'] = tmp['Code'].apply(_zfill_code)
+                name_to_code = dict(zip(tmp['Name'].astype(str), tmp['Code'].astype(str)))
+                out['code'] = out['name'].astype(str).map(name_to_code)
+
+    required = ['date', 'code', 'open', 'high', 'low', 'close', 'volume']
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"bars dataframe missing required columns: {missing}")
+
+    out['code'] = out['code'].astype(str).str.zfill(6)
+    out['date'] = pd.to_datetime(out['date'], errors='coerce')
+    out = out.dropna(subset=['date', 'code'])
+    # numeric coercions
+    for c in ['open', 'high', 'low', 'close', 'volume']:
+        out[c] = pd.to_numeric(out[c], errors='coerce')
+    # optional fields
+    if 'change' in out.columns:
+        out['change'] = pd.to_numeric(out['change'], errors='coerce')
+    else:
+        # keep downstream compatibility
+        out['change'] = np.nan
+    if 'name' in out.columns:
+        out['name'] = out['name'].astype(str)
+
+    # keep a stable column order
+    ordered = ['date', 'code', 'open', 'high', 'low', 'close', 'volume', 'change']
+    if 'name' in out.columns:
+        ordered.append('name')
+    # append any extra columns at the end
+    extras = [c for c in out.columns if c not in ordered]
+    return out[ordered + extras]
+
+
+def repair_bars_partition(target_date: str) -> str | None:
+    """Repair an existing bars partition if it is missing the `code` column.
+
+    This is intended for recovering from a bad write (e.g. scheduled crawl failure).
+    """
+    save_dir = os.path.join(DATA_DIR, f"date={target_date}")
+    save_path = os.path.join(save_dir, "part-0000.parquet")
+    if not os.path.exists(save_path):
+        print(f"[REPAIR] Partition not found: {save_path}")
+        return None
+
+    try:
+        df = pd.read_parquet(save_path)
+    except Exception as e:
+        print(f"[REPAIR] Failed to read parquet: {e}")
+        return None
+
+    if 'code' in [str(c).lower() for c in df.columns]:
+        print(f"[REPAIR] OK (code exists): {save_path}")
+        return save_path
+
+    print(f"[REPAIR] Missing code column; attempting recovery by name mapping: {save_path}")
+    try:
+        df_krx = _get_krx_listing()
+        df_krx['Code'] = df_krx['Code'].apply(_zfill_code)
+        fixed = _normalize_bars_df(df, df_krx=df_krx)
+        ensure_dir(save_dir)
+        _atomic_to_parquet(fixed, save_path)
+        print(f"[REPAIR] Rewrote partition: {save_path} (rows={len(fixed)})")
+        return save_path
+    except Exception as e:
+        print(f"[REPAIR] Recovery failed: {e}")
+        return None
 
 # -----------------------------
 # 설정
 # -----------------------------
-@dataclass(frozen=True)
-class Config:
-    # 저장 경로
-    root_dir: str = "data/krx"
-    tickers_path: str = "data/krx/master/tickers.parquet"
-    bars_dir: str = "data/krx/bars"
-    financials_dir: str = "data/krx/financials"
-    config_file: str = "config.ini"
-
-    # 보관 기간(캘린더 기준): 최근 30년 + 버퍼
-    years: int = 30
-    buffer_days: int = 180
-
-    # 호출 안정성
-    sleep_sec: float = 0.05  # KIS API 속도 제한 대응 (20 req/s -> 0.05s)
-    max_retries: int = 3
-    retry_backoff_sec: float = 0.7
-
-    # KIS API 설정
-    kis_app_key: str = os.getenv("KIS_APP_KEY", "")
-    kis_app_secret: str = os.getenv("KIS_APP_SECRET", "")
-    kis_token_file: str = "kis_token.json"
-    kis_base_url: str = "https://openapi.koreainvestment.com:9443"
-
-    # 로그/표시
-    show_every_n: int = 10
-    
-    # DART API
-    dart_api_url: str = "https://opendart.fss.or.kr/api"
-
-
-CFG = Config()
+DATA_DIR = "data/krx/bars"
+UNIVERSE_DIR = "data/krx/master/universe_mcap500"
+UNIVERSE_JSON_PATH = "data/user/universe_mcap500.json"
+MAX_WORKERS = 8  # 병렬 작업 개수 (너무 높으면 차단될 수 있음, 8~16 추천)
+START_YEAR = 2020  # 수집 시작 연도 (최초 실행시)
+MCAP_THRESHOLD_KRW = 50_000_000_000  # 500억
 
 # -----------------------------
-# KIS API 유틸
+# 유틸리티
 # -----------------------------
-_KIS_ACCESS_TOKEN = None
-
-def get_kis_access_token() -> Optional[str]:
-    global _KIS_ACCESS_TOKEN
-    
-    if _KIS_ACCESS_TOKEN:
-        return _KIS_ACCESS_TOKEN
-    
-    # 파일에서 로드
-    if os.path.exists(CFG.kis_token_file):
-        try:
-            with open(CFG.kis_token_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-                expired = data.get('expired_time', 0)
-                if time.time() < (expired - 600):  # 10분 전
-                    _KIS_ACCESS_TOKEN = data.get('access_token')
-                    return _KIS_ACCESS_TOKEN
-        except Exception:
-            pass
-
-    # 새 토큰 발급
-    url = f"{CFG.kis_base_url}/oauth2/tokenP"
-    body = {
-        "grant_type": "client_credentials",
-        "appkey": CFG.kis_app_key,
-        "appsecret": CFG.kis_app_secret
-    }
-    try:
-        res = requests.post(url, json=body, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            _KIS_ACCESS_TOKEN = data.get("access_token")
-            expires_in = data.get("expires_in", 86400)
-            with open(CFG.kis_token_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "access_token": _KIS_ACCESS_TOKEN,
-                    "expired_time": time.time() + expires_in,
-                    "issued_time": time.time()
-                }, f)
-            return _KIS_ACCESS_TOKEN
-    except Exception as e:
-        print(f"[ERROR] KIS 토큰 발급 실패: {e}")
-    return None
-
-def call_kis_api(endpoint: str, params: dict, tr_id: str) -> dict:
-    token = get_kis_access_token()
-    if not token:
-        return {}
-    
-    url = f"{CFG.kis_base_url}{endpoint}"
-    headers = {
-        "content-type": "application/json; charset=utf-8",
-        "authorization": f"Bearer {token}",
-        "appkey": CFG.kis_app_key,
-        "appsecret": CFG.kis_app_secret,
-        "tr_id": tr_id,
-        "custtype": "P"
-    }
-    try:
-        res = requests.get(url, headers=headers, params=params, timeout=10)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
-    return {}
+def get_recent_business_day():
+    """오늘이 휴일이면 전 영업일, 아니면 오늘 날짜 반환 (평일 기준 간단 처리)"""
+    today = datetime.now()
+    if today.weekday() >= 5: # 토, 일
+        gap = today.weekday() - 4
+        return (today - timedelta(days=gap)).strftime("%Y-%m-%d")
+    return today.strftime("%Y-%m-%d")
 
 
-# -----------------------------
-# 유틸
-# -----------------------------
-def ensure_dir(path: str) -> None:
-    os.makedirs(path, exist_ok=True)
+def _parse_ymd(date_str: str) -> datetime:
+    return datetime.strptime(date_str, "%Y-%m-%d")
 
 
-def yyyymmdd(dt: datetime) -> str:
-    return dt.strftime("%Y%m%d")
+def iter_dates_inclusive(start_date: str, end_date: str) -> list[str]:
+    """Return YYYY-MM-DD list from start..end inclusive."""
+    start_dt = _parse_ymd(start_date)
+    end_dt = _parse_ymd(end_date)
+    if end_dt < start_dt:
+        raise ValueError(f"end_date < start_date: {start_date}..{end_date}")
+
+    out: list[str] = []
+    cur = start_dt
+    while cur <= end_dt:
+        out.append(cur.strftime("%Y-%m-%d"))
+        cur += timedelta(days=1)
+    return out
 
 
-def get_latest_business_day() -> str:
-    today_dt = datetime.now()
-    # Simple business day calculation: if weekend, go to Friday
-    weekday = today_dt.weekday()  # 0=Mon, 6=Sun
-    if weekday == 5:  # Sat
-        latest_dt = today_dt - timedelta(days=1)
-    elif weekday == 6:  # Sun
-        latest_dt = today_dt - timedelta(days=2)
-    else:
-        latest_dt = today_dt
-    return yyyymmdd(latest_dt)
+def is_weekday(date_str: str) -> bool:
+    """Fast weekday check (does not know KRX holidays)."""
+    return _parse_ymd(date_str).weekday() < 5
+
+def ensure_dir(path):
+    if not os.path.exists(path):
+        os.makedirs(path)
 
 
-def compute_window_start(end_yyyymmdd: str, years: int, buffer_days: int) -> str:
-    end_dt = datetime.strptime(end_yyyymmdd, "%Y%m%d")
-    start_dt = end_dt - timedelta(days=years * 365 + buffer_days)
-    return yyyymmdd(start_dt)
+def _zfill_code(code: str) -> str:
+    return str(code).zfill(6)
 
 
-def list_existing_partitions_dates(bars_dir: str) -> Set[str]:
-    """
-    bars_dir 아래 date=YYYY-MM-DD 파티션명을 스캔하여 존재하는 날짜(YYYY-MM-DD) 집합 반환
-    """
-    if not os.path.exists(bars_dir):
-        return set()
-
-    dates: Set[str] = set()
-    pat = re.compile(r"^date=(\d{4}-\d{2}-\d{2})$")
-    for name in os.listdir(bars_dir):
-        m = pat.match(name)
-        if m:
-            dates.add(m.group(1))
-    return dates
-
-
-def business_days(start_yyyymmdd: str, end_yyyymmdd: str) -> List[pd.Timestamp]:
-    """
-    start~end 사이 영업일을 pd.Timestamp 리스트로 반환
-    KIS 삼성전자 데이터를 활용하여 공휴일이 반영된 영업일 추출
-    """
-    try:
-        # 삼성전자 일자별 시세 활용 (최근 30개 영업일)
-        params = {
-            "fid_cond_mrkt_div_code": "J",
-            "fid_input_iscd": "005930",
-            "fid_org_adj_prc": "1",
-            "fid_period_div_code": "D"
-        }
-        res = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-daily-price", params, "FHKST01010400")
-        output = res.get("output", [])
-        
-        dates = []
-        for day in output:
-            d_str = day.get("stck_bsop_date")
-            if not d_str: continue
-            if start_yyyymmdd <= d_str <= end_yyyymmdd:
-                dates.append(pd.to_datetime(d_str).normalize())
-        
-        if dates:
-            dates.sort()
-            return dates
-            
-        # 범위가 30일을 벗어나는 경우 FinanceDataReaderFallback
-        import FinanceDataReader as fdr
-        df = fdr.DataReader('005930', start_yyyymmdd, end_yyyymmdd)
-        if not df.empty:
-            return [pd.Timestamp(d).normalize() for d in df.index]
-            
-    except Exception as e:
-        print(f"[WARN] 영업일 목록 조회 실패: {e}")
-        
-    # 최종 fallback: 단순 주말 제외
-    start_dt = datetime.strptime(start_yyyymmdd, "%Y%m%d")
-    end_dt = datetime.strptime(end_yyyymmdd, "%Y%m%d")
+def get_recent_trading_days(n: int = 3) -> list[str]:
+    """최근 N 영업일(거래일) 목록 반환 (주말 제외, 공휴일은 정확하지 않음)"""
     days = []
-    current = start_dt
-    while current <= end_dt:
-        if current.weekday() < 5:
-            days.append(pd.Timestamp(current).normalize())
-        current += timedelta(days=1)
+    check_date = datetime.now()
+    while len(days) < n:
+        check_date -= timedelta(days=1)
+        if check_date.weekday() < 5:  # 평일만
+            days.append(check_date.strftime("%Y-%m-%d"))
     return days
 
 
-def prune_old_partitions(bars_dir: str, keep_days: int) -> int:
+def get_suspended_codes(lookback_days: int = 3) -> set[str]:
     """
-    keep_days(캘린더)보다 오래된 date=YYYY-MM-DD 파티션 삭제
-    반환: 삭제한 파티션 수
+    최근 N 영업일 내 거래정지 이력(volume=0)이 있는 종목 코드 집합 반환.
+    - bars 파티션에서 최근 데이터를 확인하여 volume=0인 종목을 찾음
     """
-    if not os.path.exists(bars_dir):
-        return 0
-
-    cutoff = (datetime.now().date() - timedelta(days=keep_days))
-    deleted = 0
-
-    for name in os.listdir(bars_dir):
-        if not name.startswith("date="):
-            continue
-        date_str = name.replace("date=", "")
-        try:
-            d = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-
-        if d < cutoff:
-            shutil.rmtree(os.path.join(bars_dir, name), ignore_errors=True)
-            deleted += 1
-
-    return deleted
-
-
-# -----------------------------
-# DART API 관련
-# -----------------------------
-def load_dart_api_key() -> Optional[str]:
-    """
-    환경변수 또는 config.ini에서 DART API 키 로드
-    """
-    # 1. 환경변수 확인
-    env_key = os.getenv("DART_API_KEY")
-    if env_key:
-        return env_key
-
-    # 2. config.ini 확인
-    if not os.path.exists(CFG.config_file):
-        print(f"[WARN] config.ini 파일이 없습니다. DART API 기능을 사용하려면 config.ini를 생성하세요.")
-        return None
+    recent_dates = get_recent_trading_days(lookback_days)
+    suspended_codes = set()
     
-    config = configparser.ConfigParser()
-    config.read(CFG.config_file, encoding='utf-8')
+    for date_str in recent_dates:
+        partition_path = os.path.join(DATA_DIR, f"date={date_str}", "part-0000.parquet")
+        if os.path.exists(partition_path):
+            try:
+                df = pd.read_parquet(partition_path)
+                if "volume" in df.columns and "code" in df.columns:
+                    # volume이 0 또는 NaN인 종목 추출
+                    zero_vol = df[(df["volume"].isna()) | (df["volume"] == 0)]
+                    suspended_codes.update(zero_vol["code"].apply(_zfill_code).tolist())
+            except Exception as e:
+                print(f"[WARN] Failed to read {partition_path}: {e}")
     
-    if 'DART' not in config or 'api_key' not in config['DART']:
-        print(f"[WARN] config.ini에 DART API 키가 설정되지 않았습니다.")
-        return None
-    
-    api_key = config['DART']['api_key'].strip()
-    if not api_key:
-        print(f"[WARN] DART API 키가 비어있습니다. https://opendart.fss.or.kr/ 에서 발급받으세요.")
-        return None
-    
-    return api_key
+    return suspended_codes
 
 
-def get_corp_code_mapping(api_key: str) -> Dict[str, str]:
-    """
-    DART 고유번호(corp_code)와 종목코드(stock_code) 매핑 가져오기
-    반환: {stock_code: corp_code}
-    """
-    url = f"{CFG.dart_api_url}/corpCode.xml"
-    params = {"crtfc_key": api_key}
-    
+def load_share_count_mapping() -> dict:
+    """public/korea_stocks.csv의 상장주식수 매핑 로드 (code -> shares)."""
+    csv_path = "public/korea_stocks.csv"
+    if not os.path.exists(csv_path):
+        return {}
     try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code != 200:
-            print(f"[ERROR] DART 기업코드 조회 실패: {response.status_code}")
+        df = pd.read_csv(csv_path)
+        if "단축코드" not in df.columns or "상장주식수" not in df.columns:
             return {}
-        
-        # XML 파싱 대신 간단한 방법으로 처리
-        import zipfile
-        import io
-        import xml.etree.ElementTree as ET
-        
-        # ZIP 파일 압축 해제
-        z = zipfile.ZipFile(io.BytesIO(response.content))
-        xml_data = z.read('CORPCODE.xml')
-        
-        # XML 파싱
-        root = ET.fromstring(xml_data)
-        mapping = {}
-        
-        for corp in root.findall('list'):
-            stock_code = corp.find('stock_code').text
-            corp_code = corp.find('corp_code').text
-            
-            # 상장 기업만 (stock_code가 있는 경우)
-            if stock_code and stock_code.strip():
-                mapping[stock_code.strip().zfill(6)] = corp_code.strip()
-        
-        return mapping
-    
-    except Exception as e:
-        print(f"[ERROR] DART 기업코드 매핑 생성 실패: {e}")
+        df["단축코드"] = df["단축코드"].apply(lambda x: str(x).zfill(6))
+        return dict(zip(df["단축코드"], df["상장주식수"]))
+    except Exception:
         return {}
 
 
-def fetch_financial_statements(api_key: str, corp_code: str, year: str, quarter: str) -> Optional[Dict[str, Any]]:
-    """
-    특정 기업의 분기 재무제표 조회
-    quarter: '11013' (1분기), '11012' (반기), '11014' (3분기), '11011' (사업보고서)
-    """
-    url = f"{CFG.dart_api_url}/fnlttSinglAcntAll.json"
-    params = {
-        "crtfc_key": api_key,
-        "corp_code": corp_code,
-        "bsns_year": year,
-        "reprt_code": quarter,
-        "fs_div": "CFS"  # 연결재무제표 (OFS: 개별재무제표)
+def build_universe_cache_from_bars(target_date: str, bars_path: str) -> pd.DataFrame:
+    """해당 날짜 bars parquet 기준으로 시총 500억 유니버스 캐시 생성."""
+    if not os.path.exists(bars_path):
+        raise FileNotFoundError(f"bars not found: {bars_path}")
+
+    df = pd.read_parquet(bars_path)
+    if df.empty:
+        raise ValueError("bars parquet is empty")
+
+    df = df.copy()
+    df["code"] = df["code"].apply(_zfill_code)
+
+    shares_map = load_share_count_mapping()
+    if not shares_map:
+        raise ValueError("share count mapping not available (public/korea_stocks.csv)")
+
+    df["shares"] = df["code"].map(shares_map).fillna(0)
+    df["market_cap"] = df["close"].astype(float) * df["shares"].astype(float)
+
+    uni = df.loc[df["market_cap"] >= MCAP_THRESHOLD_KRW, ["code", "market_cap", "close"]].copy()
+    uni.insert(0, "date", target_date)
+    uni = uni.sort_values(["market_cap", "code"], ascending=[False, True]).reset_index(drop=True)
+    return uni
+
+
+def save_universe_cache(target_date: str, universe_df: pd.DataFrame) -> None:
+    """유니버스 캐시를 parquet+json로 저장."""
+    ensure_dir(UNIVERSE_DIR)
+    dated_dir = os.path.join(UNIVERSE_DIR, f"date={target_date}")
+    ensure_dir(dated_dir)
+    dated_path = os.path.join(dated_dir, "part-0000.parquet")
+    universe_df.to_parquet(dated_path, index=False)
+
+    latest_path = os.path.join(UNIVERSE_DIR, "latest.parquet")
+    universe_df.to_parquet(latest_path, index=False)
+
+    # JSON (빠른 로드용)
+    ensure_dir(os.path.dirname(UNIVERSE_JSON_PATH))
+    payload = {
+        "date": target_date,
+        "threshold_krw": MCAP_THRESHOLD_KRW,
+        "codes": universe_df["code"].astype(str).tolist(),
     }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code != 200:
-            return None
-        
-        data = response.json()
-        if data.get('status') != '000':
-            return None
-        
-        return data
-    
-    except Exception:
-        return None
+    with open(UNIVERSE_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
-def extract_financial_metrics(data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    재무제표 데이터에서 주요 지표 추출
-    - 영업이익률 = (영업이익 / 매출액) * 100
-    """
-    if not data or 'list' not in data:
-        return {}
-    
-    metrics = {}
-    items = data['list']
-    
-    # 필요한 항목 찾기
-    for item in items:
-        account_nm = item.get('account_nm', '')
-        thstrm_amount = item.get('thstrm_amount', '0')  # 당기
-        
-        # 숫자가 아닌 경우 처리
+def load_universe_codes() -> list:
+    """저장된 유니버스 캐시에서 code list 로드 (latest 우선)."""
+    latest_path = os.path.join(UNIVERSE_DIR, "latest.parquet")
+    if os.path.exists(latest_path):
+        df = pd.read_parquet(latest_path)
+        if not df.empty and "code" in df.columns:
+            return df["code"].astype(str).str.zfill(6).tolist()
+
+    if os.path.exists(UNIVERSE_JSON_PATH):
         try:
-            amount = float(thstrm_amount.replace(',', ''))
-        except (ValueError, AttributeError):
-            amount = 0.0
-        
-        # 매출액
-        if '매출액' in account_nm and '영업' not in account_nm:
-            metrics['revenue'] = amount
-        
-        # 영업이익
-        if account_nm == '영업이익' or account_nm == '영업이익(손실)':
-            metrics['operating_profit'] = amount
-        
-        # 당기순이익
-        if '당기순이익' in account_nm and '지배' in account_nm:
-            metrics['net_income'] = amount
-    
-    # 영업이익률 계산
-    if 'revenue' in metrics and 'operating_profit' in metrics and metrics['revenue'] != 0:
-        metrics['operating_margin'] = (metrics['operating_profit'] / metrics['revenue']) * 100
-    
-    return metrics
+            with open(UNIVERSE_JSON_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            codes = payload.get("codes", [])
+            return [str(c).zfill(6) for c in codes]
+        except Exception:
+            return []
 
-
-def fetch_major_shareholders(api_key: str, corp_code: str) -> Optional[float]:
-    """
-    대주주 지분율 조회 (최대주주 지분율)
-    """
-    url = f"{CFG.dart_api_url}/hyslrInfo.json"
-    params = {
-        "crtfc_key": api_key,
-        "corp_code": corp_code
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=30)
-        if response.status_code != 200:
-            return None
-        
-        data = response.json()
-        if data.get('status') != '000' or 'list' not in data:
-            return None
-        
-        # 최대주주 지분율 추출
-        items = data['list']
-        if items and len(items) > 0:
-            # 첫 번째 항목이 최대주주
-            hold_stock_co = items[0].get('hold_stock_co', '0')
-            total_stock_co = items[0].get('tot_stock_co', '0')
-            
-            try:
-                hold = float(hold_stock_co.replace(',', ''))
-                total = float(total_stock_co.replace(',', ''))
-                
-                if total > 0:
-                    return (hold / total) * 100
-            except (ValueError, AttributeError, ZeroDivisionError):
-                pass
-        
-        return None
-    
-    except Exception:
-        return None
-
-
-def collect_financial_data_for_ticker(api_key: str, stock_code: str, corp_code: str, 
-                                      years: List[str], quarters: List[str]) -> pd.DataFrame:
-    """
-    특정 종목의 여러 분기 재무 데이터 수집
-    """
-    results = []
-    
-    for year in years:
-        for quarter_code, quarter_name in quarters:
-            data = fetch_financial_statements(api_key, corp_code, year, quarter_code)
-            
-            if data:
-                metrics = extract_financial_metrics(data)
-                
-                if metrics:
-                    results.append({
-                        'stock_code': stock_code,
-                        'year': year,
-                        'quarter': quarter_name,
-                        'revenue': metrics.get('revenue', 0),
-                        'operating_profit': metrics.get('operating_profit', 0),
-                        'net_income': metrics.get('net_income', 0),
-                        'operating_margin': metrics.get('operating_margin', 0)
-                    })
-            
-            if CFG.sleep_sec > 0:
-                time.sleep(CFG.sleep_sec)
-    
-    return pd.DataFrame(results)
-
-
-def list_existing_financial_files(financials_dir: str) -> Set[str]:
-    """
-    이미 수집된 재무 데이터 파일 확인
-    반환: {stock_code} 집합
-    """
-    if not os.path.exists(financials_dir):
-        return set()
-    
-    existing = set()
-    for filename in os.listdir(financials_dir):
-        if filename.endswith('.parquet'):
-            # 파일명 형식: {stock_code}_financials.parquet
-            stock_code = filename.replace('_financials.parquet', '')
-            existing.add(stock_code)
-    
-    return existing
-
-
-def get_current_quarter() -> tuple:
-    """
-    현재 분기 정보 반환 (년도, 분기)
-    """
-    now = datetime.now()
-    quarter = (now.month - 1) // 3 + 1
-    return now.year, quarter
-
-
-def get_last_financial_update() -> Optional[str]:
-    """
-    마지막 재무 데이터 업데이트 시점 확인
-    """
-    update_file = os.path.join(CFG.financials_dir, "_last_update.json")
-    
-    if not os.path.exists(update_file):
-        return None
-    
-    try:
-        with open(update_file, 'r') as f:
-            data = json.load(f)
-            return data.get("last_update_quarter")
-    except Exception:
-        return None
-
-
-def save_financial_update_time():
-    """
-    재무 데이터 업데이트 시점 저장
-    """
-    ensure_dir(CFG.financials_dir)
-    update_file = os.path.join(CFG.financials_dir, "_last_update.json")
-    
-    year, quarter = get_current_quarter()
-    data = {
-        "last_update_quarter": f"{year}Q{quarter}",
-        "updated_at": datetime.now().isoformat()
-    }
-    
-    with open(update_file, 'w') as f:
-        json.dump(data, f)
-
-
-def should_update_financials() -> bool:
-    """
-    재무 데이터 업데이트가 필요한지 확인 (분기당 1회)
-    """
-    last_update = get_last_financial_update()
-    
-    if last_update is None:
-        return True
-    
-    year, quarter = get_current_quarter()
-    current_quarter = f"{year}Q{quarter}"
-    
-    return last_update != current_quarter
-
-
-def collect_financials_incremental(tickers_df: pd.DataFrame, financials_dir: str, 
-                                   api_key: str, years_back: int = 2, 
-                                   force_update: bool = False) -> None:
-    """
-    재무 데이터 증분 수집 (누락된 종목만)
-    force_update: True면 분기 체크 없이 강제 수집
-    """
-    ensure_dir(financials_dir)
-    
-    # 기업코드 매핑
-    print("[INFO] DART 기업코드 매핑 로드 중...")
-    corp_mapping = get_corp_code_mapping(api_key)
-    
-    if not corp_mapping:
-        print("[ERROR] DART 기업코드 매핑 실패")
-        return
-    
-    print(f"[INFO] DART 기업코드 매핑 완료: {len(corp_mapping)} 개")
-    
-    # 이미 수집된 종목
-    existing = list_existing_financial_files(financials_dir)
-    
-    # 수집 대상 종목 필터링
-    tickers_to_fetch = []
-    for _, row in tickers_df.iterrows():
-        code = row['code']
-        if code not in existing and code in corp_mapping:
-            tickers_to_fetch.append((code, corp_mapping[code]))
-    
-    print(f"[INFO] 재무 데이터 수집 대상: {len(tickers_to_fetch)} 종목")
-    
-    if not tickers_to_fetch:
-        print("[INFO] 수집할 재무 데이터가 없습니다.")
-        return
-    
-    # 최근 N년 분기 목록 생성
-    current_year = datetime.now().year
-    years = [str(current_year - i) for i in range(years_back + 1)]
-    quarters = [
-        ('11013', 'Q1'),
-        ('11012', 'Q2'),
-        ('11014', 'Q3'),
-        ('11011', 'Q4')
-    ]
-    
-    # 진행바와 함께 수집
-    for i, (stock_code, corp_code) in enumerate(tqdm(tickers_to_fetch, 
-                                                       desc="Fetching financials", 
-                                                       unit="ticker"), 1):
-        df = collect_financial_data_for_ticker(api_key, stock_code, corp_code, years, quarters)
-        
-        if not df.empty:
-            # 파일 저장
-            out_path = os.path.join(financials_dir, f"{stock_code}_financials.parquet")
-            df.to_parquet(out_path, index=False)
-        
-        # 대주주 지분율 조회
-        major_stake = fetch_major_shareholders(api_key, corp_code)
-        if major_stake is not None:
-            # 별도 파일로 저장 (간단히)
-            stake_path = os.path.join(financials_dir, f"{stock_code}_shareholders.json")
-            with open(stake_path, 'w', encoding='utf-8') as f:
-                json.dump({'stock_code': stock_code, 'major_shareholder_stake': major_stake}, f)
-        
-        if (i % CFG.show_every_n == 0) or (i == len(tickers_to_fetch)):
-            print(f"[INFO] 진행: {i}/{len(tickers_to_fetch)} 종목")
-        
-        # API 호출 제한 대응
-        time.sleep(max(0.1, CFG.sleep_sec))
-
+    return []
 
 # -----------------------------
-# 마스터(종목 리스트) 생성/갱신
+# 크롤링 코어 로직
 # -----------------------------
-def build_and_save_tickers(latest_bday_yyyymmdd: str, out_path: str) -> pd.DataFrame:
-    ensure_dir(os.path.dirname(out_path))
-
-    # 1순위: 로컬 korea_stocks.csv 활용 (가장 안정적)
-    stock_csv = os.path.join("public", "korea_stocks.csv")
-    if os.path.exists(stock_csv):
-        print(f"[INFO] {stock_csv} 에서 티커를 로드합니다.")
+def process_single_stock(code, date_start, date_end, max_retries: int = 3):
+    """
+    한 종목의 기간 데이터를 가져옵니다. (네트워크 오류 시 재시도)
+    """
+    for attempt in range(max_retries):
         try:
-            try:
-                df_src = pd.read_csv(stock_csv, encoding='utf-8')
-            except UnicodeDecodeError:
-                df_src = pd.read_csv(stock_csv, encoding='cp949')
+            # FDRDataReader는 symbol, start, end
+            # KRX 종목코드는 숫자로만 되어있을 수 있으므로 확인 필요하지만 fdr이 알아서 처리함
+            df = fdr.DataReader(code, date_start, date_end)
+            if df.empty:
+                return None
             
-            df = pd.DataFrame()
-            df['code'] = df_src['단축코드'].astype(str).str.zfill(6)
-            df['name'] = df_src['한글 종목약명']
-            df['market'] = df_src['시장구분']
+            df = df.reset_index()
+            # 컬럼 이름 소문자 통일 (Date -> date, Close -> close 등)
+            # fdr returns columns like: Date, Open, High, Low, Close, Volume, Change
+            df.columns = [c.lower() for c in df.columns]
+            df['code'] = code
             
-            df.to_parquet(out_path, index=False)
-            return df
+            # 필요한 컬럼만
+            cols = ['date', 'code', 'open', 'high', 'low', 'close', 'volume', 'change']
+            
+            # 컬럼 존재 여부 확인 후 선택
+            available_cols = [c for c in cols if c in df.columns]
+            
+            # change 컬럼이 없는 경우 계산 (혹시 모를 대비)
+            if 'change' not in available_cols and 'close' in df.columns:
+                df['change'] = df['close'].pct_change().fillna(0)
+                available_cols.append('change')
+                
+            return df[available_cols]
+            
         except Exception as e:
-            print(f"[WARN] CSV 로드 실패: {e}")
+            error_str = str(e).lower()
+            # 네트워크 관련 오류인 경우 재시도
+            if any(keyword in error_str for keyword in ['connection', 'timeout', 'network', 'unreachable', 'refused']):
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))  # 점진적 대기
+                    continue
+            # 그 외 오류는 바로 None 반환
+            return None
+    return None
 
-    # 2순위: FinanceDataReader
+
+def _get_krx_listing(max_retries: int = 3) -> pd.DataFrame:
+    """KRX 종목 리스트 가져오기 (네트워크 오류 시 재시도)"""
+    print(">>> 종목 리스트 가져오는 중...")
+    for attempt in range(max_retries):
+        try:
+            return fdr.StockListing("KRX")
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(keyword in error_str for keyword in ['connection', 'timeout', 'network', 'unreachable']):
+                if attempt < max_retries - 1:
+                    print(f"[WARN] KRX listing fetch failed (attempt {attempt + 1}), retrying...")
+                    time.sleep(5 * (attempt + 1))
+                    continue
+            raise  # 재시도 소진 시 예외 전파
+    raise RuntimeError("Failed to fetch KRX listing after retries")
+
+
+def update_data_parallel(
+    target_date: str | None = None,
+    codes: list[str] | None = None,
+    merge_existing: bool = False,
+    lookback_days: int = 5,
+) -> str | None:
+    """병렬 처리로 일봉(또는 장중 last) 데이터를 수집하여 parquet로 저장.
+
+    - codes=None: 전체 종목
+    - merge_existing=True: 기존 date 파티션이 있으면 code 단위로 업데이트
+
+    Returns: 저장된 parquet 경로 (성공), None (실패)
+    """
+    if target_date is None:
+        target_date = datetime.now().strftime("%Y-%m-%d")
+
     try:
-        import FinanceDataReader as fdr
-        print("[INFO] FinanceDataReader로 티커 데이터 수집 중...")
-        df_krx = fdr.StockListing('KRX')
-        df = pd.DataFrame()
-        df['code'] = df_krx['Symbol'].astype(str).str.zfill(6)
-        df['name'] = df_krx['Name']
-        df['market'] = df_krx['Market']
-        df.to_parquet(out_path, index=False)
-        return df
-    except Exception:
-        pass
-
-    # 이미 파일이 있으면 반환
-    if os.path.exists(out_path):
-        return pd.read_parquet(out_path)
-    
-    return pd.DataFrame(columns=["code", "name", "market"])
-
-
-# -----------------------------
-# 일봉 수집 (KIS API 활용 - 티커별 일자별 시세)
-# -----------------------------
-def save_daily_partition(df_day: pd.DataFrame, bars_dir: str) -> Optional[str]:
-    """
-    날짜 파티션 저장 후 경로 반환
-    """
-    if df_day.empty:
+        df_krx = _get_krx_listing()
+    except Exception as e:
+        print(f"Error fetching stock listing: {e}")
         return None
 
-    # date 컬럼을 datetime으로 변환 (안전성)
-    df_day["date"] = pd.to_datetime(df_day["date"])
-    date_str = df_day["date"].iloc[0].strftime("%Y-%m-%d")
-    part_dir = os.path.join(bars_dir, f"date={date_str}")
-    ensure_dir(part_dir)
-    out_path = os.path.join(part_dir, "part-0000.parquet")
-    df_day.to_parquet(out_path, index=False)
-    return out_path
+    df_krx["Code"] = df_krx["Code"].apply(_zfill_code)
+    if codes:
+        codes_set = {str(c).zfill(6) for c in codes}
+        df_krx = df_krx[df_krx["Code"].isin(codes_set)].copy()
 
+    tickers = df_krx[["Code", "Name"]].values.tolist()
+    print(f">>> 총 {len(tickers)}개 종목 업데이트 시작 (병렬: {MAX_WORKERS}개)")
 
-# -----------------------------
-# 증분 수집 파이프라인 (KIS 최적화)
-# -----------------------------
-def collect_bars_incremental(start_yyyymmdd: str, end_yyyymmdd: str, bars_dir: str, tickers_df: pd.DataFrame) -> None:
-    ensure_dir(bars_dir)
+    save_dir = os.path.join(DATA_DIR, f"date={target_date}")
+    save_path = os.path.join(save_dir, "part-0000.parquet")
+    ensure_dir(save_dir)
 
-    existing = list_existing_partitions_dates(bars_dir)
-    days_ts = business_days(start_yyyymmdd, end_yyyymmdd)
+    # 오늘 데이터 수집을 위해 최근 N일치 정도를 넉넉히 가져와서 필터링
+    start_date = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    end_date = target_date
 
-    # 누락된 영업일만 대상 (오늘 날짜는 폴더가 있더라도 무조건 다시 수집하여 현재가 반영)
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    missing_ts: List[pd.Timestamp] = []
-    for ts in days_ts:
-        ds = ts.strftime("%Y-%m-%d")
-        if ds not in existing or ds == today_str:
-            missing_ts.append(ts)
+    today_results: list[pd.DataFrame] = []
 
-    print(f"[INFO] Business days in window: {len(days_ts)}")
-    print(f"[INFO] Missing days to fetch: {len(missing_ts)}")
-
-    if not missing_ts:
-        print("[INFO] Nothing to fetch (already up-to-date).")
-        return
-
-    # { 'YYYY-MM-DD': [ {row}, {row}, ... ] } 데이터 구조 준비
-    data_by_date = {ts.strftime("%Y-%m-%d"): [] for ts in missing_ts}
-    missing_dates_str = set(data_by_date.keys())
-
-    # KIS API를 사용하여 티커별로 최근 30일 데이터를 가져와서 missing_ts에 배분
-    # 이렇게 하면 티커당 1번의 API 호출로 여러 날짜를 커버 가능 (최대 30일)
-    
-    for i, (_, row) in enumerate(tqdm(tickers_df.iterrows(), total=len(tickers_df), desc="KIS fetching"), 1):
-        code = row['code']
-        market = row['market']
-        
-        # KIS 일자별 시세 (최근 30일)
-        params = {
-            "fid_cond_mrkt_div_code": "J",
-            "fid_input_iscd": code,
-            "fid_org_adj_prc": "1",
-            "fid_period_div_code": "D"
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+        future_to_code = {
+            executor.submit(process_single_stock, t[0], start_date, end_date): t for t in tickers
         }
-        
-        # 재시도 로직 포함
-        res = {}
-        for attempt in range(CFG.max_retries):
-            res = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-daily-price", params, "FHKST01010400")
-            if res.get("output"):
-                break
-            time.sleep(CFG.retry_backoff_sec * (attempt + 1))
-            
-        output = res.get("output", [])
-        if not output:
-            continue
-            
-        for day_data in output:
-            d_str = day_data.get("stck_bsop_date") # YYYYMMDD
-            if not d_str:
+
+        for future in tqdm(as_completed(future_to_code), total=len(tickers), desc="Fetching"):
+            res_df = future.result()
+            if res_df is None or res_df.empty:
                 continue
-            
-            # YYYY-MM-DD 형식으로 변환
-            fmt_date = f"{d_str[:4]}-{d_str[4:6]}-{d_str[6:]}"
-            
-            if fmt_date in missing_dates_str:
-                # 데이터 정규화 및 수집
-                try:
-                    data_by_date[fmt_date].append({
-                        "date": pd.to_datetime(d_str),
-                        "code": code,
-                        "market": market,
-                        "open": float(day_data.get("stck_oprc", 0) or 0),
-                        "high": float(day_data.get("stck_hgpr", 0) or 0),
-                        "low": float(day_data.get("stck_lwpr", 0) or 0),
-                        "close": float(day_data.get("stck_clpr", 0) or 0),
-                        "volume": float(day_data.get("acml_vol", 0) or 0),
-                        "value": float(day_data.get("stck_clpr", 0) or 0) * float(day_data.get("acml_vol", 0) or 0)
-                    })
-                except Exception:
-                    continue
-        
-        # 속도 제한 준수
-        time.sleep(CFG.sleep_sec)
 
-        if i % 500 == 0:
-            print(f"[INFO] Processed {i}/{len(tickers_df)} tickers...")
+            # 오늘 날짜 데이터만 필터링
+            res_df["date_str"] = res_df["date"].dt.strftime("%Y-%m-%d")
+            today_data = res_df[res_df["date_str"] == target_date].copy()
+            if today_data.empty:
+                continue
 
-    # 수집 완료된 데이터를 날짜별 파티션으로 저장
-    print("[INFO] Saving collected data to partitions...")
-    for d_str in sorted(data_by_date.keys()):
-        rows = data_by_date[d_str]
-        if rows:
-            df_day = pd.DataFrame(rows)
-            saved_path = save_daily_partition(df_day, bars_dir)
-            if saved_path:
-                print(f"[INFO] Saved {d_str}: {len(rows)} stocks -> {saved_path}")
-        else:
-            print(f"[WARN] No data found for {d_str}")
+            code = _zfill_code(today_data["code"].iloc[0])
+            name_val = future_to_code[future][1] if future in future_to_code else ""
+            today_data["code"] = code
+            today_data["name"] = name_val
+            today_data = today_data.drop(columns=["date_str"])
+            today_results.append(today_data)
+
+    if not today_results:
+        print(f"[{target_date}] 수집된 데이터가 없습니다. (휴장일이거나 데이터가 아직 업데이트되지 않았습니다.)")
+        return None
+
+    print(">>> 데이터 병합 및 저장 중...")
+    new_df = pd.concat(today_results, ignore_index=True)
+    # Validate schema before writing to parquet (prevents malformed partitions)
+    try:
+        new_df = _normalize_bars_df(new_df, df_krx=df_krx)
+    except Exception as e:
+        print(f"[ERROR] Refusing to write malformed bars parquet for {target_date}: {e}")
+        return None
+
+    if merge_existing and os.path.exists(save_path):
+        try:
+            old_df = pd.read_parquet(save_path)
+            if not old_df.empty:
+                old_df = old_df.copy()
+                old_df["code"] = old_df["code"].apply(_zfill_code)
+                new_df["code"] = new_df["code"].apply(_zfill_code)
+
+                old_df = old_df.set_index("code")
+                new_df = new_df.set_index("code")
+                old_df.update(new_df)
+                merged = old_df.reset_index()
+                merged = _normalize_bars_df(merged, df_krx=df_krx)
+                _atomic_to_parquet(merged, save_path)
+                print(f"✅ 저장 완료(merge): {save_path} (총 {len(merged)}개 종목)")
+                return save_path
+        except Exception as e:
+            print(f"[WARN] merge failed, fallback to overwrite: {e}")
+
+            _atomic_to_parquet(new_df, save_path)
+    print(f"✅ 저장 완료: {save_path} (총 {len(new_df)}개 종목)")
+    return save_path
 
 
 def main():
-    latest = get_latest_business_day()
+    global MAX_WORKERS
 
-    # 기존 데이터의 마지막 날짜부터 수집 시작 (오늘 날짜의 현재가 업데이트를 위해 덮어쓰기 허용)
-    existing_dates = list_existing_partitions_dates(CFG.bars_dir)
-    if existing_dates:
-        last_date = max(existing_dates)
-        start_dt = datetime.strptime(last_date, "%Y-%m-%d")
-        start = yyyymmdd(start_dt)
-        print(f"[INFO] Existing data up to {last_date}, checking from {start}")
+    parser = argparse.ArgumentParser(description="KRX daily/intraday crawler")
+    parser.add_argument(
+        "--mode",
+        choices=["eod", "intraday"],
+        default="eod",
+        help="eod: 전체 수집 후 유니버스 캐시 생성 / intraday: 유니버스만 업데이트",
+    )
+    parser.add_argument(
+        "--target-date",
+        default=None,
+        help="YYYY-MM-DD (기본: 오늘). 단일 날짜만 업데이트",
+    )
+    parser.add_argument(
+        "--start-date",
+        default=None,
+        help="YYYY-MM-DD (지정 시 --end-date와 함께 날짜 범위 업데이트)",
+    )
+    parser.add_argument(
+        "--end-date",
+        default=None,
+        help="YYYY-MM-DD (지정 시 --start-date와 함께 날짜 범위 업데이트)",
+    )
+    parser.add_argument(
+        "--include-weekends",
+        action="store_true",
+        help="날짜 범위 업데이트 시 주말도 시도 (기본: 주말은 skip)",
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=MAX_WORKERS,
+        help="병렬 워커 수 (기본: 8)",
+    )
+    parser.add_argument(
+        "--merge",
+        action="store_true",
+        help="기존 date 파티션이 있으면 code 단위로 merge 업데이트",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="(intraday 권장 X) 기존 date 파티션을 덮어쓰기",
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=5,
+        help="데이터 로드 lookback 일수 (기본: 5)",
+    )
+    parser.add_argument(
+        "--repair-date",
+        default=None,
+        help="YYYY-MM-DD: 기존 bars parquet가 깨졌을 때(code 누락) 복구 시도",
+    )
+    args = parser.parse_args()
+
+    MAX_WORKERS = args.workers
+
+    if args.repair_date:
+        repair_bars_partition(args.repair_date)
+        return
+
+    # Build date list
+    if args.start_date or args.end_date:
+        if not (args.start_date and args.end_date):
+            raise ValueError("Both --start-date and --end-date are required for range updates")
+        date_list = iter_dates_inclusive(args.start_date, args.end_date)
+        if not args.include_weekends:
+            date_list = [d for d in date_list if is_weekday(d)]
+        if not date_list:
+            print("[WARN] date range produced no dates after filtering")
+            return
     else:
-        start = compute_window_start(latest, CFG.years, CFG.buffer_days)
-        print(f"[INFO] No existing data, starting from {start}")
+        target_date = args.target_date or datetime.now().strftime("%Y-%m-%d")
+        date_list = [target_date]
 
-    keep_days = CFG.years * 365 + CFG.buffer_days
+    if args.mode == "intraday":
+        # Intraday uses universe cache codes (same list reused across all dates)
+        codes = load_universe_codes()
+        if not codes:
+            print(
+                "[WARN] universe cache not found. Run '--mode eod' after close at least once to create it."
+            )
+            return
 
-    print(f"[INFO] Latest business day : {latest}")
-    print(f"[INFO] Window start        : {start}  (keep_days={keep_days})")
+        # 최근 3영업일 내 거래정지 이력(volume=0)이 있는 종목 제외
+        suspended = get_suspended_codes(lookback_days=3)
+        if suspended:
+            original_count = len(codes)
+            codes = [c for c in codes if c not in suspended]
+            filtered_count = original_count - len(codes)
+            if filtered_count > 0:
+                print(f"[INFO] Filtered out {filtered_count} suspended stocks (volume=0 in last 3 days)")
 
-    # 1) 마스터(종목명/시장) 생성/갱신
-    tickers = build_and_save_tickers(latest, CFG.tickers_path)
-    print(f"[INFO] tickers saved: {CFG.tickers_path} (n={len(tickers)})")
+        for d in date_list:
+            print("=" * 70)
+            print(f"[INTRADAY] Updating universe for {d} ({len(codes)} codes)")
+            print("=" * 70)
+            saved_path = update_data_parallel(
+                target_date=d,
+                codes=codes,
+                merge_existing=(False if args.overwrite else True),
+                lookback_days=args.lookback_days,
+            )
+            if saved_path:
+                print(f"[INFO] Intraday update done: {saved_path}")
+        return
 
-    # 2) 증분 수집 (누락 영업일만)
-    print(f"[INFO] collecting bars: {start} ~ {latest}")
-    collect_bars_incremental(start, latest, CFG.bars_dir, tickers)
+    # EOD: 전체 수집
+    last_success_date: str | None = None
+    last_success_path: str | None = None
+    for d in date_list:
+        print("=" * 70)
+        print(f"[EOD] Updating all tickers for {d}")
+        print("=" * 70)
+        saved_path = update_data_parallel(
+            target_date=d,
+            codes=None,
+            merge_existing=(False if args.overwrite else args.merge),
+            lookback_days=args.lookback_days,
+        )
+        if not saved_path:
+            continue
 
-    # 3) 오래된 파티션 정리(기간 제한 유지)
-    deleted = prune_old_partitions(CFG.bars_dir, keep_days=keep_days)
-    if deleted > 0:
-        print(f"[INFO] pruned old partitions: {deleted}")
-    else:
-        print("[INFO] no partitions pruned")
+        last_success_date = d
+        last_success_path = saved_path
 
-    # 4) DART 재무 데이터 수집 (분기당 1회만)
-    print("\n[INFO] DART 재무 데이터 수집 확인...")
-    dart_api_key = load_dart_api_key()
-    
-    if dart_api_key:
-        if should_update_financials():
-            print("[INFO] 새로운 분기입니다. 재무 데이터 수집을 시작합니다.")
-            try:
-                collect_financials_incremental(tickers, CFG.financials_dir, dart_api_key, years_back=2)
-                save_financial_update_time()
-                print("[INFO] DART 재무 데이터 수집 완료")
-            except Exception as e:
-                print(f"[ERROR] DART 재무 데이터 수집 실패: {e}")
-        else:
-            year, quarter = get_current_quarter()
-            print(f"[INFO] 이번 분기({year}Q{quarter}) 재무 데이터는 이미 수집되었습니다.")
-    else:
-        print("[INFO] DART API 키가 없어 재무 데이터 수집을 건너뜁니다.")
+        # EOD 종료 후 유니버스 캐시 생성 (해당 날짜 기준)
+        try:
+            uni = build_universe_cache_from_bars(d, saved_path)
+            save_universe_cache(d, uni)
+            print(f"✅ 유니버스 캐시 생성 완료: {UNIVERSE_DIR} (총 {len(uni)}개)")
+        except Exception as e:
+            print(f"[WARN] universe cache build failed ({d}): {e}")
 
-    print("\n[INFO] done.")
+    if last_success_date is None:
+        print("[WARN] No successful EOD updates in the requested date list")
+        return
 
-    # 삼성전자 최신일 데이터 예제 출력
-    try:
-        existing_dates = list_existing_partitions_dates(CFG.bars_dir)
-        if existing_dates:
-            last_date = max(existing_dates)
-            part_dir = os.path.join(CFG.bars_dir, f"date={last_date}")
-            parquet_files = [f for f in os.listdir(part_dir) if f.endswith('.parquet')]
-            if parquet_files:
-                fp = os.path.join(part_dir, parquet_files[0])
-                df_sample = pd.read_parquet(fp)
-                samsung = df_sample[df_sample['code'] == '005930']
-                if not samsung.empty:
-                    print(f"\n[INFO] 삼성전자({last_date}) 최신일 데이터 예제:")
-                    print(samsung.head(1).to_string(index=False))
-                else:
-                    print(f"\n[INFO] 삼성전자 데이터가 {last_date}에 없습니다.")
-            else:
-                print("\n[INFO] 파티션 파일이 없습니다.")
-        else:
-            print("\n[INFO] 기존 데이터가 없습니다.")
-    except Exception as e:
-        print(f"\n[ERROR] 삼성전자 데이터 출력 실패: {e}")
-
+    print(f"[INFO] Last successful date: {last_success_date} ({last_success_path})")
 
 if __name__ == "__main__":
+    start_time = time.time()
     main()
+    end_time = time.time()
+    print(f"⏱ 소요 시간: {end_time - start_time:.2f}초 ({ (end_time - start_time)/60:.1f}분 )")

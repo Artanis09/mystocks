@@ -1,0 +1,9 @@
+/*
+  Placeholder stylesheet.
+  The app primarily uses Tailwind via CDN and inline styles in index.html,
+  but Vite build expects referenced assets to exist.
+*/
+
+:root {
+  color-scheme: dark;
+}

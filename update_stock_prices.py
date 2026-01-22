@@ -9,12 +9,15 @@ import json
 import requests
 import time
 import sys
+import sqlite3
+import threading
+import subprocess
 from flask import Flask, jsonify, request
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 import os
 from pathlib import Path
-from ml.inference import run_inference
+from ml.inference import run_inference, run_inference_both
 
 try:
     import pyarrow.parquet as pq
@@ -26,6 +29,25 @@ CORS(app)  # 모든 도메인에서 접근 허용
 
 # 글로벌 인메모리 캐시 (KIS API 데이터용)
 _kis_api_cache = {}
+
+# =============================
+# 스케줄러 상태 관리
+# =============================
+_scheduler_state = {
+    "eod_done_today": False,       # 오늘 9시~10시 EOD 실행 여부
+    "intraday_done_today": False,  # 오늘 15시~15시30분 Intraday 실행 여부
+    "inference_done_today": False, # 오늘 15시~15시30분 Inference 실행 여부
+    "last_check_date": None,       # 마지막 체크 날짜
+    "crawling_status": None,       # 'eod' | 'intraday' | None
+    "crawling_start_time": None,   # 크롤링 시작 시간
+    "crawling_error": None,        # 크롤링 에러 메시지
+    # 최근 수집 완료 정보
+    "last_crawl_completed_at": None,  # 마지막 수집 완료 시간 (ISO 형식)
+    "last_crawl_mode": None,          # 마지막 수집 모드 ('eod', 'intraday', 'manual')
+    "last_crawl_date_range": None,    # 마지막 수집 날짜 범위
+    "last_crawl_duration": None,      # 마지막 수집 소요시간 (초)
+}
+_scheduler_lock = threading.Lock()
 
 # SQLite 데이터베이스 설정
 import os
@@ -237,6 +259,8 @@ class Journal(db.Model):
 class Recommendation(db.Model):
     id = db.Column(db.Integer, primary_key=True, autoincrement=True)
     date = db.Column(db.String(10), nullable=False)  # YYYY-MM-DD
+    filter_tag = db.Column(db.String(20), nullable=False, default='filter2')
+    model_name = db.Column(db.String(50), nullable=False, default='model1')
     code = db.Column(db.String(20), nullable=False)
     name = db.Column(db.String(100), nullable=False)
     base_price = db.Column(db.Float, nullable=False)  # 추천 당시 종가
@@ -301,6 +325,25 @@ def merged_stock_info(code: str, business_day: str, fundamentals: dict, local_ba
 def init_db():
     with app.app_context():
         db.create_all()
+        # Lightweight schema migration for existing SQLite DB
+        try:
+            conn = sqlite3.connect(db_path)
+            cur = conn.cursor()
+            cur.execute("PRAGMA table_info(recommendation)")
+            cols = {row[1] for row in cur.fetchall()}
+            if 'filter_tag' not in cols:
+                cur.execute("ALTER TABLE recommendation ADD COLUMN filter_tag TEXT DEFAULT 'filter2'")
+                conn.commit()
+            if 'model_name' not in cols:
+                cur.execute("ALTER TABLE recommendation ADD COLUMN model_name TEXT DEFAULT 'model1'")
+                conn.commit()
+        except Exception as e:
+            print(f"[WARN] DB migration failed: {e}")
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
         print("데이터베이스 초기화 완료")
 
 # 한국투자증권 API 설정
@@ -964,20 +1007,50 @@ def api_stock_info(code):
 
 @app.route('/api/recommendations', methods=['GET'])
 def get_recommendations():
+    """추천 종목 조회 - KIS API 실패해도 DB 데이터는 반환"""
+    kis_api_available = True  # KIS API 사용 가능 여부 플래그
+    kis_error_message = None
+    
     try:
-        # DB에서 전체 히스토리 조회 (최신순 -> 기대수익률순)
-        # Recommendation.query...
-        recs = Recommendation.query.order_by(Recommendation.date.desc(), Recommendation.expected_return.desc()).all()
+        filter_tag = request.args.get('filter')
+        model_name = (request.args.get('model') or 'model1').lower()
+        skip_realtime = request.args.get('skip_realtime', 'false').lower() == 'true'
+
+        allowed_models = {'model1', 'model5'}
+        if model_name not in allowed_models:
+            return jsonify({"error": f"Unsupported model: {model_name}. Allowed: {sorted(allowed_models)}"}), 400
         
-        # 날짜별로 그룹핑하거나, 프론트에서 할 수도 있음. 여기서는 플랫 리스트로 주고 현재가 정보를 붙임.
+        # DB에서 전체 히스토리 조회 (최신순 -> 기대수익률순)
+        q = Recommendation.query
+        if filter_tag in {'filter1', 'filter2'}:
+            q = q.filter_by(filter_tag=filter_tag)
+        if model_name:
+            q = q.filter_by(model_name=model_name)
+        recs = q.order_by(Recommendation.date.desc(), Recommendation.expected_return.desc()).all()
+        
         results = []
         
-        # 현재가 조회를 위한 기초 데이터 로드 (로컬 바)
-        latest_date = get_recent_business_day()
-        local_bars = get_local_bars_for_codes(latest_date, [r.code for r in recs])
+        # 현재가 조회를 위한 기초 데이터 로드 (로컬 바) - 항상 시도
+        local_bars = {}
+        try:
+            latest_date = get_recent_business_day()
+            local_bars = get_local_bars_for_codes(latest_date, [r.code for r in recs])
+        except Exception as e:
+            print(f"[WARN] Failed to load local bars: {e}")
         
-        # 오늘 날짜
-        today_str = datetime.now().strftime('%Y-%m-%d')
+        # KIS API 사용 가능 여부 사전 체크 (첫 번째 종목으로 테스트)
+        if not skip_realtime and recs:
+            try:
+                test_code = recs[0].code.zfill(6)
+                test_result = get_kis_realtime_price(test_code)
+                if test_result is None or 'error' in str(test_result).lower():
+                    kis_api_available = False
+                    kis_error_message = "KIS API 연결 실패 - 실시간 가격 조회 불가"
+                    print(f"[WARN] KIS API unavailable: {test_result}")
+            except Exception as e:
+                kis_api_available = False
+                kis_error_message = f"KIS API 오류: {str(e)[:100]}"
+                print(f"[WARN] KIS API check failed: {e}")
         
         for rec in recs:
             code = rec.code.zfill(6)
@@ -985,28 +1058,38 @@ def get_recommendations():
             # 기본값: 로컬 바 가격 -> 없으면 base_price
             current_price = 0
             if code in local_bars:
-                current_price = local_bars[code]['close']
+                current_price = local_bars[code].get('close', 0)
             if current_price == 0:
                 current_price = rec.base_price
-                
-            # 실시간 API 가격 업데이트 (오늘자 추천이거나, 사용자 요청 시)
-            # 여기서는 모든 추천 내역에 대해 실시간 가격을 가져오면 좋겠지만 너무 느림.
-            # 하지만 사용자 경험을 위해 KIS API 호출 시도 (캐시 활용 가능하면 좋음)
-            # update_stock_prices.ts의 get_kis_realtime_price 활용
-            try:
-                # 간단한 인메모리 캐싱 (1분)
-                now_ts = time.time()
-                cached = _kis_api_cache.get(f"price_{code}")
-                if cached and (now_ts - cached['ts'] < 60):
-                    current_price = cached['price']
-                else:
-                    # KIS API 호출
-                    kis_price = get_kis_realtime_price(code)
-                    if kis_price and kis_price.get('currentPrice', 0) > 0:
-                        current_price = float(kis_price['currentPrice'])
-                        _kis_api_cache[f"price_{code}"] = {'price': current_price, 'ts': now_ts}
-            except Exception:
-                pass # KIS 실패 시 기존 가격 유지
+            
+            current_change = 0
+            price_source = 'base'  # 가격 소스: 'base', 'local', 'realtime'
+            
+            if code in local_bars and local_bars[code].get('close', 0) > 0:
+                price_source = 'local'
+            
+            # KIS API가 사용 가능하고 skip_realtime이 아닐 때만 실시간 조회
+            if kis_api_available and not skip_realtime:
+                try:
+                    now_ts = time.time()
+                    cached = _kis_api_cache.get(f"price_{code}")
+                    if cached and (now_ts - cached['ts'] < 60):
+                        current_price = cached['price']
+                        current_change = cached.get('changePercent', 0)
+                        price_source = 'realtime'
+                    else:
+                        kis_price = get_kis_realtime_price(code)
+                        if kis_price and kis_price.get('currentPrice', 0) > 0:
+                            current_price = float(kis_price['currentPrice'])
+                            current_change = float(kis_price.get('changePercent', 0))
+                            _kis_api_cache[f"price_{code}"] = {
+                                'price': current_price, 
+                                'changePercent': current_change,
+                                'ts': now_ts
+                            }
+                            price_source = 'realtime'
+                except Exception:
+                    pass  # KIS 실패 시 기존 가격 유지
             
             # 수익률 계산
             profit_rate = 0
@@ -1016,67 +1099,166 @@ def get_recommendations():
             results.append({
                 'id': rec.id,
                 'date': rec.date,
+                'filter_tag': getattr(rec, 'filter_tag', 'filter2'),
+                'model_name': getattr(rec, 'model_name', 'model1'),
                 'code': code,
                 'name': rec.name,
                 'base_price': rec.base_price,
                 'current_price': current_price,
+                'current_change': current_change,
                 'probability': rec.probability,
                 'expected_return': rec.expected_return,
                 'market_cap': rec.market_cap,
-                'return_rate': profit_rate
+                'return_rate': profit_rate,
+                'price_source': price_source  # 프론트엔드에서 실시간 여부 표시용
             })
-            
-        return jsonify(results)
+        
+        response_data = {
+            'recommendations': results,
+            'kis_api_available': kis_api_available,
+            'kis_error': kis_error_message,
+            'count': len(results)
+        }
+        
+        # 하위 호환성: 기존 프론트엔드가 배열을 기대할 수 있으므로
+        # X-KIS-Available 헤더로 상태 전달하고 본문은 배열 유지
+        response = jsonify(results)
+        response.headers['X-KIS-Available'] = 'true' if kis_api_available else 'false'
+        if kis_error_message:
+            response.headers['X-KIS-Error'] = kis_error_message
+        return response
+        
     except Exception as e:
         print(f"Error in getting recommendations: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/recommendations', methods=['DELETE'])
+def delete_recommendations():
+    """날짜별/필터별 추천 목록 삭제"""
+    try:
+        date_str = request.args.get('date')
+        filter_tag = request.args.get('filter')
+        model_name = (request.args.get('model') or 'model1').lower()
+
+        allowed_models = {'model1', 'model5'}
+        if model_name not in allowed_models:
+            return jsonify({"error": f"Unsupported model: {model_name}. Allowed: {sorted(allowed_models)}"}), 400
+        
+        if not date_str:
+            return jsonify({"error": "Date is required"}), 400
+            
+        q = Recommendation.query.filter_by(date=date_str)
+        if filter_tag:
+            q = q.filter_by(filter_tag=filter_tag)
+        if model_name:
+            q = q.filter_by(model_name=model_name)
+            
+        count = q.delete()
+        db.session.commit()
+        
+        return jsonify({"message": f"Deleted {count} recommendations for {date_str} ({filter_tag or 'all filters'} / {model_name})"})
+    except Exception as e:
+        db.session.rollback()
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/recommendations/predict', methods=['POST'])
 def update_recommendations():
     try:
-        today_str = datetime.now().strftime('%Y-%m-%d')
-        
-        # 이미 오늘 데이터가 있는지 확인 (강제 갱신 요청이 아니면)
-        # 여기서 강제 갱신 로직은 프론트엔드가 이 엔드포인트를 호출한다는 것 자체가 갱신 요청으로 간주
-        # 단, 중복 생성을 막기 위해 오늘자 데이터는 삭제하고 다시 생성
-        
-        Recommendation.query.filter_by(date=today_str).delete()
-        
-        # ML 추론 실행
-        print("Running AI Inference...")
-        top_candidates = run_inference(top_k=5, min_prob_threshold=0.8, save_result=True)
-        
-        if top_candidates.empty:
-            db.session.commit() # 삭제 반영
-            return jsonify({"message": "No candidates found", "count": 0, "date": today_str})
-            
+        req_filter = (request.args.get('filter') or 'both').lower()
+        model_name = (request.args.get('model') or 'model1').lower()
+
+        allowed_models = {'model1', 'model5'}
+        if model_name not in allowed_models:
+            return jsonify({"error": f"Unsupported model: {model_name}. Allowed: {sorted(allowed_models)}"}), 400
+
+        if req_filter not in {'2', 'filter2'}:
+            return jsonify({"error": "Only filter2 is supported for AI predictions."}), 400
+
+        if model_name == 'model5':
+            try:
+                import lightgbm  # noqa: F401
+            except ModuleNotFoundError:
+                import sys
+                return (
+                    jsonify(
+                        {
+                            "error": "model5 requires the 'lightgbm' package, but it is not installed in the backend Python environment.",
+                            "how_to_fix": [
+                                "Use the project venv Python to install: .\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt",
+                                "Or install only LightGBM: .\\.venv\\Scripts\\python.exe -m pip install lightgbm",
+                                "Then restart the backend server.",
+                            ],
+                            "backend_python": sys.executable,
+                        }
+                    ),
+                    500,
+                )
+
+        # ML 추론 실행 (Filter2 고정)
+        print("Running AI Inference (Filter2)...")
+        results_by_filter = {
+            'filter2': run_inference(
+                model_path=None,
+                top_k=5,
+                min_prob_threshold=0.70,
+                min_market_cap_krw=50_000_000_000,
+                daily_strength_min=-0.05,
+                return_1d_min=-0.05,
+                upper_lock_cut=0.295,
+                save_result=True,
+                model_name=model_name,
+            )
+        }
+
         # 종목명 매핑
         from ml.inference import get_stock_name_mapping
         name_map = get_stock_name_mapping()
-        
-        new_recs = []
+
         now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        
-        for _, row in top_candidates.iterrows():
-            code = str(row['code']).zfill(6)
-            name = name_map.get(code, code)
-            
-            rec = Recommendation(
-                date=today_str,
-                code=code,
-                name=name,
-                base_price=float(row['close']),
-                probability=float(row['positive_proba']),
-                expected_return=float(row['expected_return']),
-                market_cap=float(row['market_cap']),
-                created_at=now_ts
-            )
-            db.session.add(rec)
-            new_recs.append(rec)
+        summary = {}
+
+        for filter_tag, top_candidates in results_by_filter.items():
+            if top_candidates is None or top_candidates.empty:
+                summary[filter_tag] = {"count": 0}
+                continue
+
+            # Inference 기준일(최근 종가 데이터 날짜)을 추천 날짜로 사용
+            base_date_val = top_candidates.iloc[0].get('date')
+            if hasattr(base_date_val, 'strftime'):
+                base_date_str = base_date_val.strftime('%Y-%m-%d')
+            else:
+                base_date_str = str(base_date_val)[:10]
+
+            # 중복 생성을 막기 위해 동일 기준일+필터+모델 데이터는 삭제 후 재생성
+            Recommendation.query.filter_by(date=base_date_str, filter_tag=filter_tag, model_name=model_name).delete()
+
+            new_recs = []
+            for _, row in top_candidates.iterrows():
+                code = str(row['code']).zfill(6)
+                name = name_map.get(code, code)
+
+                rec = Recommendation(
+                    date=base_date_str,
+                    filter_tag=filter_tag,
+                    model_name=model_name,
+                    code=code,
+                    name=name,
+                    base_price=float(row['close']),
+                    probability=float(row['positive_proba']),
+                    expected_return=float(row['expected_return']),
+                    market_cap=float(row['market_cap']),
+                    created_at=now_ts,
+                )
+                db.session.add(rec)
+                new_recs.append(rec)
+
+            summary[filter_tag] = {"count": len(new_recs), "date": base_date_str}
             
         db.session.commit()
-        
-        return jsonify({"message": "Prediction complete", "count": len(new_recs), "date": today_str})
+
+        return jsonify({"message": "Prediction complete", "summary": summary})
         
     except Exception as e:
         db.session.rollback()
@@ -2485,6 +2667,1029 @@ def get_market_investor_trends():
         return jsonify({"error": str(e)}), 500
 
 
+# =============================
+# 스케줄러 및 자동 실행 관련
+# =============================
+
+def reset_scheduler_state_if_new_day():
+    """새로운 날짜라면 스케줄러 상태를 리셋 (최근 수집 정보는 유지)"""
+    global _scheduler_state
+    today = datetime.now().strftime('%Y-%m-%d')
+    with _scheduler_lock:
+        if _scheduler_state["last_check_date"] != today:
+            _scheduler_state["eod_done_today"] = False
+            _scheduler_state["intraday_done_today"] = False
+            _scheduler_state["inference_done_today"] = False
+            _scheduler_state["last_check_date"] = today
+            _scheduler_state["crawling_status"] = None
+            _scheduler_state["crawling_error"] = None
+            # 최근 수집 정보는 유지 (last_crawl_* 필드들)
+            print(f"[Scheduler] New day detected: {today}, state reset.")
+
+
+def check_internet_connection(timeout: int = 5) -> bool:
+    """인터넷 연결 확인 (여러 호스트 시도)"""
+    hosts = [
+        "https://www.google.com",
+        "https://www.naver.com",
+        "https://openapi.koreainvestment.com:9443"
+    ]
+    for host in hosts:
+        try:
+            requests.get(host, timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def check_network_and_retry(max_retries: int = 3, delay: int = 10) -> bool:
+    """네트워크 연결 확인 및 재시도"""
+    for attempt in range(max_retries):
+        if check_internet_connection():
+            return True
+        print(f"[Network] Connection failed, retry {attempt + 1}/{max_retries} in {delay}s...")
+        time.sleep(delay)
+    return False
+
+
+def run_crawl_eod(max_retries: int = 3):
+    """EOD 모드로 크롤링 실행 (유니버스 캐시 생성) - 네트워크 오류 시 재시도"""
+    global _scheduler_state
+    start_time = datetime.now()
+    target_date = datetime.now().strftime('%Y-%m-%d')
+    
+    with _scheduler_lock:
+        _scheduler_state["crawling_status"] = "eod"
+        _scheduler_state["crawling_start_time"] = start_time.isoformat()
+        _scheduler_state["crawling_error"] = None
+    
+    print("[Scheduler] Starting EOD crawl (--mode eod --merge)...")
+    
+    for attempt in range(max_retries):
+        # 네트워크 연결 확인
+        if not check_network_and_retry(max_retries=2, delay=5):
+            print(f"[Scheduler] Network unavailable, attempt {attempt + 1}/{max_retries}")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = "Network connection failed"
+            if attempt < max_retries - 1:
+                time.sleep(30)  # 30초 후 재시도
+                continue
+            break
+        
+        try:
+            result = subprocess.run(
+                [sys.executable, "crawl.py", "--mode", "eod", "--workers", "8", "--merge"],
+                cwd=os.path.dirname(__file__) or ".",
+                capture_output=True,
+                text=True,
+                timeout=3600  # 1시간 타임아웃
+            )
+            end_time = datetime.now()
+            duration_seconds = (end_time - start_time).total_seconds()
+            
+            if result.returncode == 0:
+                # 파티션 무결성 검증
+                partition_ok = _verify_partition_integrity(target_date)
+                if not partition_ok:
+                    print(f"[Scheduler] Partition integrity check failed, attempting repair...")
+                    _repair_partition_if_needed(target_date)
+                
+                print("[Scheduler] EOD crawl completed successfully.")
+                with _scheduler_lock:
+                    _scheduler_state["eod_done_today"] = True
+                    _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
+                    _scheduler_state["last_crawl_mode"] = "eod (auto)"
+                    _scheduler_state["last_crawl_date_range"] = target_date
+                    _scheduler_state["last_crawl_duration"] = duration_seconds
+                return True
+            else:
+                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
+                print(f"[Scheduler] EOD crawl failed (attempt {attempt + 1}): {error_msg}")
+                
+                # 네트워크 관련 에러인지 확인
+                if any(keyword in error_msg.lower() for keyword in ['network', 'connection', 'timeout', 'unreachable']):
+                    print(f"[Scheduler] Network error detected, will retry...")
+                    if attempt < max_retries - 1:
+                        time.sleep(30)
+                        continue
+                
+                with _scheduler_lock:
+                    _scheduler_state["crawling_error"] = error_msg
+                    
+        except subprocess.TimeoutExpired:
+            print(f"[Scheduler] EOD crawl timeout (attempt {attempt + 1})")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = "Crawl timeout (1 hour)"
+            if attempt < max_retries - 1:
+                continue
+                
+        except Exception as e:
+            print(f"[Scheduler] EOD crawl exception (attempt {attempt + 1}): {e}")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(30)
+                continue
+        
+        break  # 성공하거나 재시도 불필요한 실패 시 루프 탈출
+    
+    # 실패 시 파티션 복구 시도
+    _repair_partition_if_needed(target_date)
+    
+    with _scheduler_lock:
+        _scheduler_state["crawling_status"] = None
+    return False
+
+
+def _verify_partition_integrity(target_date: str) -> bool:
+    """파티션 파일 무결성 검증 (code 컬럼 존재 여부 등)"""
+    try:
+        import pandas as pd
+        partition_path = f"data/krx/bars/date={target_date}/part-0000.parquet"
+        if not os.path.exists(partition_path):
+            return False
+        df = pd.read_parquet(partition_path)
+        required_cols = ['date', 'code', 'open', 'high', 'low', 'close', 'volume']
+        missing = [c for c in required_cols if c not in df.columns]
+        if missing:
+            print(f"[Verify] Missing columns in {target_date}: {missing}")
+            return False
+        if df.empty:
+            print(f"[Verify] Empty dataframe for {target_date}")
+            return False
+        return True
+    except Exception as e:
+        print(f"[Verify] Partition integrity check error: {e}")
+        return False
+
+
+def _repair_partition_if_needed(target_date: str) -> bool:
+    """파티션 오류 시 복구 시도"""
+    try:
+        if _verify_partition_integrity(target_date):
+            return True
+        
+        print(f"[Repair] Attempting to repair partition for {target_date}...")
+        result = subprocess.run(
+            [sys.executable, "crawl.py", "--repair-date", target_date],
+            cwd=os.path.dirname(__file__) or ".",
+            capture_output=True,
+            text=True,
+            timeout=300  # 5분 타임아웃
+        )
+        
+        if result.returncode == 0:
+            print(f"[Repair] Successfully repaired partition for {target_date}")
+            return True
+        else:
+            print(f"[Repair] Failed to repair: {result.stderr}")
+            return False
+    except Exception as e:
+        print(f"[Repair] Exception during repair: {e}")
+        return False
+
+
+def run_crawl_intraday(max_retries: int = 3):
+    """Intraday 모드로 크롤링 실행 (유니버스만 업데이트) - 네트워크 오류 시 재시도"""
+    global _scheduler_state
+    start_time = datetime.now()
+    target_date = datetime.now().strftime('%Y-%m-%d')
+    
+    with _scheduler_lock:
+        _scheduler_state["crawling_status"] = "intraday"
+        _scheduler_state["crawling_start_time"] = start_time.isoformat()
+        _scheduler_state["crawling_error"] = None
+    
+    print("[Scheduler] Starting intraday crawl (--mode intraday)...")
+    
+    for attempt in range(max_retries):
+        # 네트워크 연결 확인
+        if not check_network_and_retry(max_retries=2, delay=5):
+            print(f"[Scheduler] Network unavailable, attempt {attempt + 1}/{max_retries}")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = "Network connection failed"
+            if attempt < max_retries - 1:
+                time.sleep(15)  # 15초 후 재시도
+                continue
+            break
+        
+        try:
+            result = subprocess.run(
+                [sys.executable, "crawl.py", "--mode", "intraday", "--workers", "8"],
+                cwd=os.path.dirname(__file__) or ".",
+                capture_output=True,
+                text=True,
+                timeout=1800  # 30분 타임아웃
+            )
+            end_time = datetime.now()
+            duration_seconds = (end_time - start_time).total_seconds()
+            
+            if result.returncode == 0:
+                # 파티션 무결성 검증
+                partition_ok = _verify_partition_integrity(target_date)
+                if not partition_ok:
+                    print(f"[Scheduler] Partition integrity check failed, attempting repair...")
+                    _repair_partition_if_needed(target_date)
+                
+                print("[Scheduler] Intraday crawl completed successfully.")
+                with _scheduler_lock:
+                    _scheduler_state["intraday_done_today"] = True
+                    _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
+                    _scheduler_state["last_crawl_mode"] = "intraday (auto)"
+                    _scheduler_state["last_crawl_date_range"] = target_date
+                    _scheduler_state["last_crawl_duration"] = duration_seconds
+                with _scheduler_lock:
+                    _scheduler_state["crawling_status"] = None
+                return True
+            else:
+                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
+                print(f"[Scheduler] Intraday crawl failed (attempt {attempt + 1}): {error_msg}")
+                
+                # 네트워크 관련 에러인지 확인
+                if any(keyword in error_msg.lower() for keyword in ['network', 'connection', 'timeout', 'unreachable']):
+                    print(f"[Scheduler] Network error detected, will retry...")
+                    if attempt < max_retries - 1:
+                        time.sleep(15)
+                        continue
+                
+                with _scheduler_lock:
+                    _scheduler_state["crawling_error"] = error_msg
+                    
+        except subprocess.TimeoutExpired:
+            print(f"[Scheduler] Intraday crawl timeout (attempt {attempt + 1})")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = "Crawl timeout (30 min)"
+            if attempt < max_retries - 1:
+                continue
+                
+        except Exception as e:
+            print(f"[Scheduler] Intraday crawl exception (attempt {attempt + 1}): {e}")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = str(e)
+            if attempt < max_retries - 1:
+                time.sleep(15)
+                continue
+        
+        break
+    
+    # 실패 시 파티션 복구 시도
+    _repair_partition_if_needed(target_date)
+    
+    with _scheduler_lock:
+        _scheduler_state["crawling_status"] = None
+    return False
+
+
+def run_inference_for_models():
+    """model1과 model5로 inference 실행하여 DB에 저장"""
+    global _scheduler_state
+    print("[Scheduler] Running inference for model1 and model5...")
+    
+    try:
+        for model_name in ['model1', 'model5']:
+            print(f"[Scheduler] Running inference for {model_name}...")
+            top_candidates = run_inference(
+                model_path=None,
+                top_k=5,
+                min_prob_threshold=0.70,
+                min_market_cap_krw=50_000_000_000,
+                daily_strength_min=-0.05,
+                return_1d_min=-0.05,
+                upper_lock_cut=0.295,
+                save_result=True,
+                model_name=model_name,
+            )
+            
+            if top_candidates is not None and not top_candidates.empty:
+                # DB에 저장
+                from ml.inference import get_stock_name_mapping
+                name_map = get_stock_name_mapping()
+                
+                base_date_val = top_candidates.iloc[0].get('date')
+                if hasattr(base_date_val, 'strftime'):
+                    base_date_str = base_date_val.strftime('%Y-%m-%d')
+                else:
+                    base_date_str = str(base_date_val)[:10]
+                
+                with app.app_context():
+                    # 중복 제거
+                    Recommendation.query.filter_by(
+                        date=base_date_str, 
+                        filter_tag='filter2', 
+                        model_name=model_name
+                    ).delete()
+                    
+                    now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    for _, row in top_candidates.iterrows():
+                        code = str(row['code']).zfill(6)
+                        name = name_map.get(code, code)
+                        rec = Recommendation(
+                            date=base_date_str,
+                            filter_tag='filter2',
+                            model_name=model_name,
+                            code=code,
+                            name=name,
+                            base_price=float(row['close']),
+                            probability=float(row['positive_proba']),
+                            expected_return=float(row['expected_return']),
+                            market_cap=float(row['market_cap']),
+                            created_at=now_ts,
+                        )
+                        db.session.add(rec)
+                    
+                    db.session.commit()
+                    print(f"[Scheduler] {model_name} inference saved: {len(top_candidates)} stocks for {base_date_str}")
+        
+        with _scheduler_lock:
+            _scheduler_state["inference_done_today"] = True
+        print("[Scheduler] All inference completed.")
+        
+    except Exception as e:
+        print(f"[Scheduler] Inference failed: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def scheduler_tick():
+    """스케줄러 1회 체크"""
+    reset_scheduler_state_if_new_day()
+    
+    now = datetime.now()
+    hour = now.hour
+    minute = now.minute
+    
+    # 인터넷 연결 확인
+    if not check_internet_connection():
+        return
+    
+    with _scheduler_lock:
+        eod_done = _scheduler_state["eod_done_today"]
+        intraday_done = _scheduler_state["intraday_done_today"]
+        inference_done = _scheduler_state["inference_done_today"]
+        crawling = _scheduler_state["crawling_status"]
+    
+    # 크롤링 중이면 스킵
+    if crawling:
+        return
+    
+    # 9시~10시: EOD 모드로 유니버스 캐시 생성 (1회)
+    if 9 <= hour < 10 and not eod_done:
+        print(f"[Scheduler] Time window 09:00-10:00, running EOD crawl...")
+        threading.Thread(target=run_crawl_eod, daemon=True).start()
+    
+    # 15시~15시30분: Intraday 모드로 유니버스 업데이트 + Inference (1회)
+    if hour == 15 and 0 <= minute < 30:
+        if not intraday_done:
+            print(f"[Scheduler] Time window 15:00-15:30, running intraday crawl...")
+            # 동기적으로 실행하여 완료 후 inference 실행
+            def intraday_then_inference():
+                success = run_crawl_intraday()
+                if success and not _scheduler_state["inference_done_today"]:
+                    run_inference_for_models()
+            threading.Thread(target=intraday_then_inference, daemon=True).start()
+
+
+def scheduler_loop():
+    """스케줄러 메인 루프 (30초마다 체크)"""
+    print("[Scheduler] Scheduler thread started.")
+    while True:
+        try:
+            scheduler_tick()
+        except Exception as e:
+            print(f"[Scheduler] Error in tick: {e}")
+        time.sleep(30)
+
+
+def start_scheduler_thread():
+    """스케줄러 백그라운드 스레드 시작"""
+    t = threading.Thread(target=scheduler_loop, daemon=True)
+    t.start()
+    print("[Scheduler] Background scheduler thread started.")
+
+
+# =============================
+# 스케줄러 상태 및 크롤링 상태 API
+# =============================
+
+@app.route('/api/scheduler/status', methods=['GET'])
+def get_scheduler_status():
+    """스케줄러 및 크롤링 상태 조회"""
+    with _scheduler_lock:
+        return jsonify({
+            "eod_done_today": _scheduler_state["eod_done_today"],
+            "intraday_done_today": _scheduler_state["intraday_done_today"],
+            "inference_done_today": _scheduler_state["inference_done_today"],
+            "last_check_date": _scheduler_state["last_check_date"],
+            "crawling_status": _scheduler_state["crawling_status"],  # 'eod' | 'intraday' | None
+            "crawling_start_time": _scheduler_state["crawling_start_time"],
+            "crawling_error": _scheduler_state["crawling_error"],
+            # 최근 수집 완료 정보
+            "last_crawl_completed_at": _scheduler_state["last_crawl_completed_at"],
+            "last_crawl_mode": _scheduler_state["last_crawl_mode"],
+            "last_crawl_date_range": _scheduler_state["last_crawl_date_range"],
+            "last_crawl_duration": _scheduler_state["last_crawl_duration"],
+        })
+
+
+@app.route('/api/scheduler/trigger', methods=['POST'])
+def trigger_scheduler_task():
+    """수동으로 스케줄러 작업 트리거"""
+    task = request.args.get('task')  # 'eod' | 'intraday' | 'inference'
+    
+    with _scheduler_lock:
+        if _scheduler_state["crawling_status"]:
+            return jsonify({"error": "Another crawling task is already running."}), 400
+    
+    if task == 'eod':
+        threading.Thread(target=run_crawl_eod, daemon=True).start()
+        return jsonify({"message": "EOD crawl started."})
+    elif task == 'intraday':
+        threading.Thread(target=run_crawl_intraday, daemon=True).start()
+        return jsonify({"message": "Intraday crawl started."})
+    elif task == 'inference':
+        threading.Thread(target=run_inference_for_models, daemon=True).start()
+        return jsonify({"message": "Inference started."})
+    else:
+        return jsonify({"error": "Invalid task. Use 'eod', 'intraday', or 'inference'."}), 400
+
+
+def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
+    """날짜 범위로 크롤링 실행"""
+    global _scheduler_state
+    crawl_start_time = datetime.now()
+    
+    with _scheduler_lock:
+        _scheduler_state["crawling_status"] = mode
+        _scheduler_state["crawling_start_time"] = crawl_start_time.isoformat()
+        _scheduler_state["crawling_error"] = None
+    
+    try:
+        print(f"[Crawler] Running {mode} crawl from {start_date} to {end_date}...")
+        python_exec = sys.executable
+        cmd = [
+            python_exec, "crawl.py",
+            "--mode", mode,
+            "--start-date", start_date,
+            "--end-date", end_date,
+            "--merge"
+        ]
+        result = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(__file__) or ".",
+            capture_output=True,
+            text=True,
+            timeout=3600  # 1시간 타임아웃
+        )
+        crawl_end_time = datetime.now()
+        duration_seconds = (crawl_end_time - crawl_start_time).total_seconds()
+        
+        if result.returncode == 0:
+            print(f"[Crawler] {mode} crawl ({start_date} ~ {end_date}) completed successfully.")
+            with _scheduler_lock:
+                _scheduler_state["last_crawl_completed_at"] = crawl_end_time.isoformat()
+                _scheduler_state["last_crawl_mode"] = f"{mode} (manual)"
+                _scheduler_state["last_crawl_date_range"] = f"{start_date} ~ {end_date}" if start_date != end_date else start_date
+                _scheduler_state["last_crawl_duration"] = duration_seconds
+            return True
+        else:
+            print(f"[Crawler] {mode} crawl failed: {result.stderr}")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = result.stderr[:500] if result.stderr else "Unknown error"
+            return False
+    except Exception as e:
+        print(f"[Crawler] {mode} crawl exception: {e}")
+        with _scheduler_lock:
+            _scheduler_state["crawling_error"] = str(e)
+        return False
+    finally:
+        with _scheduler_lock:
+            _scheduler_state["crawling_status"] = None
+
+
+@app.route('/api/crawl', methods=['POST'])
+def manual_crawl():
+    """수동 데이터 수집 API"""
+    data = request.get_json() or {}
+    start_date = data.get('start_date')
+    end_date = data.get('end_date')
+    mode = data.get('mode', 'eod')  # 'eod' or 'intraday'
+    
+    # 기본값: 오늘 날짜
+    today = datetime.now().strftime('%Y-%m-%d')
+    if not start_date:
+        start_date = today
+    if not end_date:
+        end_date = start_date
+    
+    # 날짜 형식 검증
+    try:
+        datetime.strptime(start_date, '%Y-%m-%d')
+        datetime.strptime(end_date, '%Y-%m-%d')
+    except ValueError:
+        return jsonify({"error": "Invalid date format. Use YYYY-MM-DD."}), 400
+    
+    with _scheduler_lock:
+        if _scheduler_state["crawling_status"]:
+            return jsonify({"error": "Another crawling task is already running."}), 400
+    
+    # 백그라운드에서 실행
+    threading.Thread(
+        target=run_crawl_with_dates, 
+        args=(start_date, end_date, mode),
+        daemon=True
+    ).start()
+    
+    return jsonify({
+        "message": f"{mode.upper()} crawl started for {start_date} to {end_date}.",
+        "start_date": start_date,
+        "end_date": end_date,
+        "mode": mode
+    })
+
+
+# =============================
+# 개별 추천 삭제 API
+# =============================
+
+@app.route('/api/recommendations/<int:rec_id>', methods=['DELETE'])
+def delete_single_recommendation(rec_id):
+    """개별 추천 종목 삭제"""
+    try:
+        rec = Recommendation.query.get(rec_id)
+        if not rec:
+            return jsonify({"error": "Recommendation not found"}), 404
+        
+        db.session.delete(rec)
+        db.session.commit()
+        return jsonify({"message": f"Deleted recommendation {rec_id}"})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================
+# 실시간 가격 조회 API (배치)
+# =============================
+
+@app.route('/api/realtime-prices', methods=['POST'])
+def get_realtime_prices():
+    """여러 종목의 실시간 가격을 한번에 조회 (KIS API)"""
+    try:
+        data = request.get_json() or {}
+        codes = data.get('codes', [])
+        
+        if not codes or len(codes) > 20:
+            return jsonify({"error": "Provide 1-20 stock codes"}), 400
+        
+        results = {}
+        for code in codes:
+            code = str(code).zfill(6)
+            try:
+                # 캐시 확인 (5초)
+                now_ts = time.time()
+                cached = _kis_api_cache.get(f"price_{code}")
+                if cached and (now_ts - cached['ts'] < 5):
+                    results[code] = {
+                        'current_price': cached['price'],
+                        'change_percent': cached.get('changePercent', 0),
+                    }
+                else:
+                    kis_price = get_kis_realtime_price(code)
+                    if kis_price and kis_price.get('currentPrice', 0) > 0:
+                        current_price = float(kis_price['currentPrice'])
+                        change_percent = float(kis_price.get('changePercent', 0))
+                        _kis_api_cache[f"price_{code}"] = {
+                            'price': current_price,
+                            'changePercent': change_percent,
+                            'ts': now_ts
+                        }
+                        results[code] = {
+                            'current_price': current_price,
+                            'change_percent': change_percent,
+                        }
+                    else:
+                        results[code] = {'current_price': None, 'change_percent': None}
+            except Exception as e:
+                results[code] = {'current_price': None, 'change_percent': None, 'error': str(e)}
+            
+            # KIS API rate limit 방지 (0.2초 딜레이)
+            time.sleep(0.2)
+        
+        return jsonify(results)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# =============================
+# KIS 계좌 조회 및 주문 API
+# =============================
+
+# 계좌번호 (환경변수에서 로드)
+KIS_ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")  # 예: "12345678-01"
+# 자산 히스토리 (간단한 메모리 저장, 실제 서비스에서는 DB 사용)
+_asset_history = []
+
+def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET", body=None):
+    """KIS 트레이딩 API 호출 (계좌 조회, 주문 등)"""
+    token = get_kis_access_token()
+    if not token:
+        return {"error": "토큰 발급 실패"}
+    
+    url = f"https://openapi.koreainvestment.com:9443{endpoint}"
+    headers = {
+        "content-type": "application/json; charset=utf-8",
+        "authorization": f"Bearer {token}",
+        "appkey": APP_KEY,
+        "appsecret": APP_SECRET,
+        "tr_id": tr_id,
+        "custtype": "P"
+    }
+    
+    try:
+        if method == "POST":
+            response = requests.post(url, headers=headers, json=body, timeout=10)
+        else:
+            response = requests.get(url, headers=headers, params=params, timeout=10)
+        
+        print(f"KIS Trading API [{tr_id}] 응답: {response.status_code}")
+        if response.status_code != 200:
+            return {"error": f"API 오류: {response.status_code}", "detail": response.text}
+        
+        return response.json()
+    except Exception as e:
+        print(f"KIS Trading API 호출 실패: {e}")
+        return {"error": str(e)}
+
+
+@app.route('/api/kis/account-balance', methods=['GET'])
+def api_kis_account_balance():
+    """KIS 계좌 잔고/자산현황 조회"""
+    try:
+        if not KIS_ACCOUNT_NO:
+            return jsonify({
+                "success": False,
+                "error": "KIS_ACCOUNT_NO 환경변수가 설정되지 않았습니다.",
+                "hint": "환경변수에 KIS_ACCOUNT_NO=계좌번호-상품코드 형식으로 설정하세요 (예: 12345678-01)"
+            }), 200  # 400 대신 200으로 반환하여 프론트엔드에서 처리 가능
+        
+        if not APP_KEY or not APP_SECRET:
+            return jsonify({
+                "success": False,
+                "error": "KIS API 인증 정보가 설정되지 않았습니다.",
+                "hint": "환경변수에 KIS_APP_KEY, KIS_APP_SECRET을 설정하세요"
+            }), 200
+        
+        account_parts = KIS_ACCOUNT_NO.split("-")
+        if len(account_parts) != 2:
+            return jsonify({
+                "success": False,
+                "error": "KIS_ACCOUNT_NO 형식이 잘못되었습니다.",
+                "hint": "형식: 계좌번호-상품코드 (예: 12345678-01)"
+            }), 200
+        
+        cano = account_parts[0]  # 계좌번호 앞 8자리
+        acnt_prdt_cd = account_parts[1]  # 계좌번호 뒤 2자리
+        
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "AFHR_FLPR_YN": "N",  # 시간외단일가여부
+            "OFL_YN": "",  # 오프라인여부
+            "INQR_DVSN": "02",  # 조회구분 (01: 대출일별, 02: 종목별)
+            "UNPR_DVSN": "01",  # 단가구분
+            "FUND_STTL_ICLD_YN": "N",  # 펀드결제분포함여부
+            "FNCG_AMT_AUTO_RDPT_YN": "N",  # 융자금액자동상환여부
+            "PRCS_DVSN": "00",  # 처리구분 (00: 전일매매포함, 01: 전일매매미포함)
+            "CTX_AREA_FK100": "",
+            "CTX_AREA_NK100": ""
+        }
+        
+        # 잔고조회 API (TTTC8434R: 주식잔고조회)
+        result = call_kis_trading_api(
+            "/uapi/domestic-stock/v1/trading/inquire-balance",
+            params=params,
+            tr_id="TTTC8434R"
+        )
+        
+        if "error" in result:
+            return jsonify(result), 500
+        
+        output1 = result.get("output1", [])  # 보유종목 리스트
+        output2 = result.get("output2", [{}])[0] if result.get("output2") else {}  # 계좌 총계
+        
+        # 보유종목 정보 파싱
+        holdings = []
+        for item in output1:
+            holding = {
+                "code": item.get("pdno", ""),  # 종목코드
+                "name": item.get("prdt_name", ""),  # 종목명
+                "quantity": int(item.get("hldg_qty", 0) or 0),  # 보유수량
+                "avgPrice": float(item.get("pchs_avg_pric", 0) or 0),  # 매입평균가
+                "currentPrice": int(item.get("prpr", 0) or 0),  # 현재가
+                "evalAmount": int(item.get("evlu_amt", 0) or 0),  # 평가금액
+                "profitLoss": int(item.get("evlu_pfls_amt", 0) or 0),  # 평가손익금액
+                "profitRate": float(item.get("evlu_pfls_rt", 0) or 0),  # 평가손익률
+                "purchaseAmount": int(item.get("pchs_amt", 0) or 0),  # 매입금액
+            }
+            holdings.append(holding)
+        
+        # 계좌 총계 정보
+        account_summary = {
+            "totalEvalAmount": int(output2.get("tot_evlu_amt", 0) or 0),  # 총평가금액
+            "totalPurchaseAmount": int(output2.get("pchs_amt_smtl_amt", 0) or 0),  # 매입금액합계
+            "totalProfitLoss": int(output2.get("evlu_pfls_smtl_amt", 0) or 0),  # 평가손익합계
+            "totalProfitRate": float(output2.get("evlu_pfls_rt", 0) or 0) if output2.get("evlu_pfls_rt") else 0,  # 평가손익률
+            "depositBalance": int(output2.get("dnca_tot_amt", 0) or 0),  # 예수금총액
+            "availableCash": int(output2.get("nass_amt", 0) or 0),  # 순자산금액
+            "d2Deposit": int(output2.get("prvs_rcdl_excc_amt", 0) or 0),  # D+2 예수금
+        }
+        
+        # 자산 히스토리에 추가 (간단한 시계열 데이터)
+        global _asset_history
+        now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
+        _asset_history.append({
+            "time": now_str,
+            "totalAsset": account_summary["totalEvalAmount"] + account_summary["depositBalance"]
+        })
+        # 최근 100개만 유지
+        if len(_asset_history) > 100:
+            _asset_history = _asset_history[-100:]
+        
+        return jsonify({
+            "success": True,
+            "holdings": holdings,
+            "summary": account_summary,
+            "assetHistory": _asset_history
+        })
+    except Exception as e:
+        print(f"계좌 잔고 조회 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/kis/order-available', methods=['GET'])
+def api_kis_order_available():
+    """KIS 매수가능금액 조회"""
+    try:
+        if not KIS_ACCOUNT_NO:
+            return jsonify({"error": "KIS_ACCOUNT_NO 환경변수가 설정되지 않았습니다."}), 400
+        
+        code = request.args.get('code', '005930')  # 기본: 삼성전자
+        price = request.args.get('price', '0')
+        
+        account_parts = KIS_ACCOUNT_NO.split("-")
+        cano = account_parts[0]
+        acnt_prdt_cd = account_parts[1]
+        
+        params = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "PDNO": str(code).zfill(6),  # 종목코드
+            "ORD_UNPR": str(price),  # 주문단가 (시장가=0)
+            "ORD_DVSN": "01",  # 주문구분 (01: 시장가)
+            "CMA_EVLU_AMT_ICLD_YN": "Y",  # CMA평가금액포함여부
+            "OVRS_ICLD_YN": "N"  # 해외포함여부
+        }
+        
+        result = call_kis_trading_api(
+            "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
+            params=params,
+            tr_id="TTTC8908R"
+        )
+        
+        if "error" in result:
+            return jsonify(result), 500
+        
+        output = result.get("output", {})
+        
+        return jsonify({
+            "success": True,
+            "orderAvailable": {
+                "availableCash": int(output.get("ord_psbl_cash", 0) or 0),  # 주문가능현금
+                "maxQuantity": int(output.get("max_buy_qty", 0) or 0),  # 최대매수가능수량
+                "availableAmount": int(output.get("nrcvb_buy_amt", 0) or 0),  # 미수없는매수금액
+            }
+        })
+    except Exception as e:
+        print(f"매수가능금액 조회 오류: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/kis/order', methods=['POST'])
+def api_kis_order():
+    """KIS 주식 주문 (시장가 매수/매도)"""
+    try:
+        if not KIS_ACCOUNT_NO:
+            return jsonify({"error": "KIS_ACCOUNT_NO 환경변수가 설정되지 않았습니다."}), 400
+        
+        data = request.get_json() or {}
+        code = str(data.get('code', '')).zfill(6)
+        quantity = int(data.get('quantity', 0))
+        order_type = data.get('orderType', 'buy')  # 'buy' or 'sell'
+        
+        if not code or quantity <= 0:
+            return jsonify({"error": "종목코드와 수량이 필요합니다."}), 400
+        
+        account_parts = KIS_ACCOUNT_NO.split("-")
+        cano = account_parts[0]
+        acnt_prdt_cd = account_parts[1]
+        
+        # 주문 요청 바디
+        body = {
+            "CANO": cano,
+            "ACNT_PRDT_CD": acnt_prdt_cd,
+            "PDNO": code,  # 종목코드
+            "ORD_DVSN": "01",  # 01: 시장가
+            "ORD_QTY": str(quantity),  # 주문수량
+            "ORD_UNPR": "0",  # 시장가는 0
+        }
+        
+        # TR_ID: TTTC0802U(매수), TTTC0801U(매도)
+        tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"
+        
+        result = call_kis_trading_api(
+            "/uapi/domestic-stock/v1/trading/order-cash",
+            tr_id=tr_id,
+            method="POST",
+            body=body
+        )
+        
+        if "error" in result:
+            return jsonify(result), 500
+        
+        output = result.get("output", {})
+        
+        return jsonify({
+            "success": True,
+            "order": {
+                "orderNo": output.get("ODNO", ""),  # 주문번호
+                "orderTime": output.get("ORD_TMD", ""),  # 주문시각
+                "code": code,
+                "quantity": quantity,
+                "orderType": order_type
+            },
+            "message": f"{'매수' if order_type == 'buy' else '매도'} 주문이 접수되었습니다."
+        })
+    except Exception as e:
+        print(f"주문 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/kis/batch-order', methods=['POST'])
+def api_kis_batch_order():
+    """KIS 일괄 주문 (여러 종목 시장가 매수/매도)"""
+    try:
+        if not KIS_ACCOUNT_NO:
+            return jsonify({"error": "KIS_ACCOUNT_NO 환경변수가 설정되지 않았습니다."}), 400
+        
+        data = request.get_json() or {}
+        orders = data.get('orders', [])  # [{code, quantity, orderType}]
+        
+        if not orders:
+            return jsonify({"error": "주문 목록이 비어있습니다."}), 400
+        
+        results = []
+        for order in orders:
+            code = str(order.get('code', '')).zfill(6)
+            quantity = int(order.get('quantity', 0))
+            order_type = order.get('orderType', 'buy')
+            
+            if not code or quantity <= 0:
+                results.append({
+                    "code": code,
+                    "success": False,
+                    "error": "잘못된 종목코드 또는 수량"
+                })
+                continue
+            
+            account_parts = KIS_ACCOUNT_NO.split("-")
+            cano = account_parts[0]
+            acnt_prdt_cd = account_parts[1]
+            
+            body = {
+                "CANO": cano,
+                "ACNT_PRDT_CD": acnt_prdt_cd,
+                "PDNO": code,
+                "ORD_DVSN": "01",
+                "ORD_QTY": str(quantity),
+                "ORD_UNPR": "0",
+            }
+            
+            tr_id = "TTTC0802U" if order_type == "buy" else "TTTC0801U"
+            
+            result = call_kis_trading_api(
+                "/uapi/domestic-stock/v1/trading/order-cash",
+                tr_id=tr_id,
+                method="POST",
+                body=body
+            )
+            
+            if "error" in result:
+                results.append({
+                    "code": code,
+                    "success": False,
+                    "error": result.get("error", "Unknown error")
+                })
+            else:
+                output = result.get("output", {})
+                results.append({
+                    "code": code,
+                    "success": True,
+                    "orderNo": output.get("ODNO", ""),
+                    "orderType": order_type,
+                    "quantity": quantity
+                })
+            
+            # KIS API rate limit 방지
+            time.sleep(0.3)
+        
+        success_count = sum(1 for r in results if r.get("success"))
+        
+        return jsonify({
+            "success": True,
+            "results": results,
+            "summary": {
+                "total": len(orders),
+                "success": success_count,
+                "failed": len(orders) - success_count
+            }
+        })
+    except Exception as e:
+        print(f"일괄 주문 오류: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/kis/calculate-order', methods=['POST'])
+def api_kis_calculate_order():
+    """매수 수량 계산 (총자산 대비 비율 기반)"""
+    try:
+        data = request.get_json() or {}
+        code = str(data.get('code', '')).zfill(6)
+        ratio = float(data.get('ratio', 0))  # 총자산 대비 비율 (%)
+        total_asset = float(data.get('totalAsset', 0))  # 총자산
+        
+        if ratio <= 0 or total_asset <= 0:
+            return jsonify({"error": "비율과 총자산이 필요합니다."}), 400
+        
+        # 현재가 조회
+        kis_price = get_kis_realtime_price(code)
+        current_price = kis_price.get('currentPrice', 0)
+        
+        if current_price <= 0:
+            return jsonify({"error": "현재가를 조회할 수 없습니다."}), 400
+        
+        # 매수금액 계산
+        buy_amount = total_asset * (ratio / 100)
+        # 매수 가능 수량 계산
+        quantity = int(buy_amount / current_price)
+        
+        return jsonify({
+            "success": True,
+            "code": code,
+            "currentPrice": current_price,
+            "ratio": ratio,
+            "buyAmount": buy_amount,
+            "quantity": quantity
+        })
+    except Exception as e:
+        print(f"매수 수량 계산 오류: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api/kis/calculate-sell', methods=['POST'])
+def api_kis_calculate_sell():
+    """매도 수량 계산 (보유수량 대비 비율 기반)"""
+    try:
+        data = request.get_json() or {}
+        code = str(data.get('code', '')).zfill(6)
+        ratio = float(data.get('ratio', 0))  # 보유수량 대비 비율 (%)
+        holding_quantity = int(data.get('holdingQuantity', 0))  # 보유수량
+        
+        if ratio <= 0 or holding_quantity <= 0:
+            return jsonify({"error": "비율과 보유수량이 필요합니다."}), 400
+        
+        # 매도 수량 계산
+        sell_quantity = int(holding_quantity * (ratio / 100))
+        
+        if sell_quantity <= 0:
+            sell_quantity = 1  # 최소 1주
+        
+        return jsonify({
+            "success": True,
+            "code": code,
+            "ratio": ratio,
+            "holdingQuantity": holding_quantity,
+            "sellQuantity": sell_quantity
+        })
+    except Exception as e:
+        print(f"매도 수량 계산 오류: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 if __name__ == '__main__':
     # 데이터베이스 초기화
     init_db()
@@ -2500,5 +3705,8 @@ if __name__ == '__main__':
     except Exception as e:
         print(f"KIS API 테스트 실패: {e}")
     
+    # 스케줄러 스레드 시작
+    start_scheduler_thread()
+    
     print("=== Flask 서버 시작 ===")
-    app.run(debug=True, port=5000)
+    app.run(debug=True, port=5000, use_reloader=False)  # use_reloader=False to prevent double thread start

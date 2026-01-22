@@ -139,12 +139,15 @@ export type GroupData = StockGroup;
 export interface RecommendedStock {
   id?: number;
   date?: string;
+  filter_tag?: 'filter1' | 'filter2' | string;
+  model_name?: string;
   code: string;
   name: string;
   // close는 base_price(추천 당시 가격)로 매핑
   close: number;  
   base_price?: number;
   current_price?: number;
+  current_change?: number; // 당일 등락률 (KIS 실시간)
   market_cap: number;
   probability: number;
   expected_return: number;

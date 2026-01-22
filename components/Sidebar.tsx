@@ -16,6 +16,12 @@ interface SidebarProps {
 
 const menuItems: { id: PageType; label: string; icon: React.ReactNode; description: string }[] = [
   { 
+    id: 'recommendations', 
+    label: 'AI추천', 
+    icon: <Sparkles className="w-5 h-5" />,
+    description: 'Filter2 기반 예측'
+  },
+  { 
     id: 'dashboard', 
     label: '대시보드', 
     icon: <LayoutDashboard className="w-5 h-5" />,
@@ -26,12 +32,6 @@ const menuItems: { id: PageType; label: string; icon: React.ReactNode; descripti
     label: '포트폴리오', 
     icon: <Briefcase className="w-5 h-5" />,
     description: '종목 분석 및 관리'
-  },
-  { 
-    id: 'recommendations', 
-    label: 'AI 투자', 
-    icon: <Sparkles className="w-5 h-5" />,
-    description: 'AI 선정 전략 종목'
   },
   { 
     id: 'journal', 
