@@ -22,7 +22,8 @@ import {
   Plus
 } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+// Use relative path for API calls to work with domain/proxy
+const API_BASE_URL = '/api';
 
 interface GroupReturnSummary {
   totalProfit: number;

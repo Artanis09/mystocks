@@ -8,6 +8,17 @@ export default defineConfig(({ mode }) => {
       server: {
         port: 3000,
         host: '0.0.0.0',
+        allowedHosts: ['waltz-star.exe.xyz'],
+        proxy: {
+          '/api': {
+            target: 'http://backend:5000',
+            changeOrigin: true,
+          },
+          '/update-stocks': {
+            target: 'http://backend:5000',
+            changeOrigin: true,
+          },
+        },
       },
       plugins: [react()],
       define: {

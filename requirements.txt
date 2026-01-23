@@ -12,5 +12,7 @@ scikit-learn
 tqdm
 pyarrow
 schedule
-mojito-python
+pykrx
 finance-datareader
+openai
+google-generativeai

@@ -8,7 +8,7 @@ import {
 } from 'recharts';
 import { ArrowLeft, Plus, Calendar, Trash2, TrendingUp, TrendingDown, Clock, BarChart3, PieChart, Activity, Globe, Zap, ScrollText, CandlestickChart as CandleIcon, MousePointer2, Users2, AlertCircle, DollarSign } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
 // 시가총액을 한국어 단위로 변환 (예: 8조2천2백억)
 const formatMarketCap = (value: string | number): string => {

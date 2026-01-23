@@ -24,7 +24,12 @@ try:
 except Exception:  # pragma: no cover
     pq = None
 
-app = Flask(__name__)
+# Static folder for serving built frontend
+static_folder = os.path.join(os.path.dirname(__file__), 'static')
+if not os.path.exists(static_folder):
+    static_folder = None
+
+app = Flask(__name__, static_folder=static_folder, static_url_path='')
 CORS(app)  # 모든 도메인에서 접근 허용
 
 # 글로벌 인메모리 캐시 (KIS API 데이터용)
@@ -51,7 +56,11 @@ _scheduler_lock = threading.Lock()
 
 # SQLite 데이터베이스 설정
 import os
-db_path = os.path.join(os.path.dirname(__file__), 'mystock.db')
+# Docker 환경에서는 /app/db 볼륨 사용, 로컬에서는 현재 디렉토리 사용
+db_dir = os.environ.get('DB_PATH', os.path.dirname(__file__))
+if db_dir and db_dir != os.path.dirname(__file__):
+    os.makedirs(db_dir, exist_ok=True)
+db_path = os.path.join(db_dir, 'mystock.db')
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
@@ -267,6 +276,8 @@ class Recommendation(db.Model):
     probability = db.Column(db.Float, default=0)
     expected_return = db.Column(db.Float, default=0)
     market_cap = db.Column(db.Float, default=0)
+    ai_analysis = db.Column(db.Text, nullable=True)  # AI 분석 결과
+    ai_service = db.Column(db.String(20), nullable=True)  # 분석에 사용된 AI 서비스 (openai/gemini)
     created_at = db.Column(db.String(50), nullable=False)
 
 # 포트폴리오 일간 수익률 히스토리 (캐싱용)
@@ -336,6 +347,12 @@ def init_db():
                 conn.commit()
             if 'model_name' not in cols:
                 cur.execute("ALTER TABLE recommendation ADD COLUMN model_name TEXT DEFAULT 'model1'")
+                conn.commit()
+            if 'ai_analysis' not in cols:
+                cur.execute("ALTER TABLE recommendation ADD COLUMN ai_analysis TEXT")
+                conn.commit()
+            if 'ai_service' not in cols:
+                cur.execute("ALTER TABLE recommendation ADD COLUMN ai_service TEXT")
                 conn.commit()
         except Exception as e:
             print(f"[WARN] DB migration failed: {e}")
@@ -1110,7 +1127,9 @@ def get_recommendations():
                 'expected_return': rec.expected_return,
                 'market_cap': rec.market_cap,
                 'return_rate': profit_rate,
-                'price_source': price_source  # 프론트엔드에서 실시간 여부 표시용
+                'price_source': price_source,  # 프론트엔드에서 실시간 여부 표시용
+                'ai_analysis': getattr(rec, 'ai_analysis', None),
+                'ai_service': getattr(rec, 'ai_service', None),
             })
         
         response_data = {
@@ -1168,6 +1187,8 @@ def update_recommendations():
     try:
         req_filter = (request.args.get('filter') or 'both').lower()
         model_name = (request.args.get('model') or 'model1').lower()
+        
+        send_ntfy_notification(f"수동 AI 예측 시작 (모델: {model_name})")
 
         allowed_models = {'model1', 'model5'}
         if model_name not in allowed_models:
@@ -1257,6 +1278,27 @@ def update_recommendations():
             summary[filter_tag] = {"count": len(new_recs), "date": base_date_str}
             
         db.session.commit()
+
+        # 알림 전송
+        for filter_tag, info in summary.items():
+            if info.get("count", 0) > 0:
+                stocks_list = [Recommendation.query.filter_by(date=info["date"], filter_tag=filter_tag, model_name=model_name).all()]
+                # 위 방식은 세션 관리상 위험하므로 names를 루프 안에서 수집
+                pass 
+        
+        # 다시 작성 (루프 안에서 수집하도록)
+        notification_msg = []
+        for filter_tag, top_candidates in results_by_filter.items():
+            if top_candidates is not None and not top_candidates.empty:
+                model_stocks = []
+                for _, row in top_candidates.iterrows():
+                    code = str(row['code']).zfill(6)
+                    model_stocks.append(name_map.get(code, code))
+                if model_stocks:
+                    notification_msg.append(f"[{model_name}] 수동 예측 완료: {', '.join(model_stocks)}")
+        
+        if notification_msg:
+            send_ntfy_notification("\n".join(notification_msg))
 
         return jsonify({"message": "Prediction complete", "summary": summary})
         
@@ -2713,6 +2755,134 @@ def check_network_and_retry(max_retries: int = 3, delay: int = 10) -> bool:
     return False
 
 
+def send_ntfy_notification(message):
+    """ntfy.sh를 통해 알림 전송"""
+    print(f"[Ntfy] Attempting to send message: {message[:50]}...")
+    try:
+        topic_url = "https://ntfy.sh/wayne-akdlrjf0924"
+        # 헤더에 한글이 포함되면 latin-1 인코딩 에러가 발생하므로 제거하거나 인코딩 필요
+        resp = requests.post(topic_url, 
+                      data=message.encode('utf-8'),
+                      headers={
+                          "Title": "MyStocks Notification", # ASCII 가능하도록 변경
+                          "Priority": "default"
+                      },
+                      timeout=10)
+        print(f"[Ntfy] Notification sent! Status: {resp.status_code}")
+    except Exception as e:
+        print(f"[Ntfy] Notification failed: {e}")
+
+
+@app.route('/api/test-notification', methods=['GET'])
+def test_notification_api():
+    """알림 테스트용 API"""
+    send_ntfy_notification("테스트 알림입니다 (API 호출)")
+    return jsonify({"message": "Test notification sent"}), 200
+
+
+# =============================
+# AI 종목 분석 API (OpenAI / Gemini)
+# =============================
+
+STOCK_ANALYSIS_PROMPT = """당신은 한국 주식 시장 전문 애널리스트입니다.
+종목명: {stock_name} (종목코드: {stock_code})
+
+각 종목의 가장 최신뉴스들을 분석하여, 상장폐지나 거래정지 등 크리티컬한 위험 요소가 있다면 "⚠️ 매매금지" 메시지를 주세요.
+최신뉴스와 오늘의 트렌드 관점에서 다음날까지의 단기보유 관점에서 참고 또는 주의할점, 매매를 한다면 손익비 관점에서의 진입, 탈출 등에 관한 조언을 3줄 이하로 요약해주세요.
+
+응답 형식:
+- 위험요소 발견 시: "⚠️ 매매금지: [이유]" 로 시작
+- 정상: 단기 매매 관점과 조언 요약
+
+반드시 한국어로 답변하고, 최대 3줄로 간결하게 작성하세요."""
+
+
+def get_stock_analysis_from_openai(stock_name: str, stock_code: str) -> str:
+    """OpenAI API를 통해 종목에 대한 매매 관점 분석 요약"""
+    import openai
+    
+    openai_api_key = os.getenv("OPENAI_API_KEY")
+    if not openai_api_key:
+        return "OpenAI API 키가 설정되지 않았습니다."
+    
+    try:
+        client = openai.OpenAI(api_key=openai_api_key)
+        prompt = STOCK_ANALYSIS_PROMPT.format(stock_name=stock_name, stock_code=stock_code)
+        
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": "당신은 한국 주식 시장 전문 애널리스트입니다. 간결하고 핵심적인 분석을 제공합니다."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=400,
+            temperature=0.7
+        )
+        
+        return response.choices[0].message.content.strip()
+    
+    except Exception as e:
+        print(f"[OpenAI Error] {stock_name}: {e}")
+        return f"분석 실패: {str(e)[:50]}"
+
+
+def get_stock_analysis_from_gemini(stock_name: str, stock_code: str) -> str:
+    """Google Gemini API를 통해 종목에 대한 매매 관점 분석 요약"""
+    import google.generativeai as genai
+    
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+    if not gemini_api_key:
+        return "Gemini API 키가 설정되지 않았습니다."
+    
+    try:
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel('gemini-2.0-flash')
+        prompt = STOCK_ANALYSIS_PROMPT.format(stock_name=stock_name, stock_code=stock_code)
+        
+        response = model.generate_content(prompt)
+        return response.text.strip()
+    
+    except Exception as e:
+        print(f"[Gemini Error] {stock_name}: {e}")
+        return f"분석 실패: {str(e)[:50]}"
+
+
+@app.route('/api/stock-analysis', methods=['POST'])
+def get_stock_analysis():
+    """종목 분석 API - OpenAI/Gemini를 통한 매매 관점 요약"""
+    try:
+        data = request.get_json()
+        stocks = data.get('stocks', [])  # [{"code": "005930", "name": "삼성전자"}, ...]
+        ai_service = data.get('ai_service', 'openai')  # 'openai' or 'gemini'
+        
+        if not stocks:
+            return jsonify({"error": "stocks 리스트가 비어있습니다."}), 400
+        
+        if len(stocks) > 10:
+            return jsonify({"error": "한 번에 최대 10개 종목만 분석 가능합니다."}), 400
+        
+        # AI 서비스 선택
+        analysis_func = get_stock_analysis_from_gemini if ai_service == 'gemini' else get_stock_analysis_from_openai
+        print(f"[Stock Analysis] Using {ai_service.upper()} for {len(stocks)} stocks")
+        
+        results = {}
+        for stock in stocks:
+            code = stock.get('code', '')
+            name = stock.get('name', '')
+            if code and name:
+                analysis = analysis_func(name, code)
+                results[code] = {
+                    "name": name,
+                    "analysis": analysis
+                }
+        
+        return jsonify({"analyses": results, "ai_service": ai_service})
+    
+    except Exception as e:
+        print(f"[Stock Analysis Error] {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 def run_crawl_eod(max_retries: int = 3):
     """EOD 모드로 크롤링 실행 (유니버스 캐시 생성) - 네트워크 오류 시 재시도"""
     global _scheduler_state
@@ -2756,12 +2926,15 @@ def run_crawl_eod(max_retries: int = 3):
                     _repair_partition_if_needed(target_date)
                 
                 print("[Scheduler] EOD crawl completed successfully.")
+                send_ntfy_notification("데이터수집 완료 (EOD 모드)")
                 with _scheduler_lock:
                     _scheduler_state["eod_done_today"] = True
                     _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
                     _scheduler_state["last_crawl_mode"] = "eod (auto)"
                     _scheduler_state["last_crawl_date_range"] = target_date
                     _scheduler_state["last_crawl_duration"] = duration_seconds
+                with _scheduler_lock:
+                    _scheduler_state["crawling_status"] = None
                 return True
             else:
                 error_msg = result.stderr[:500] if result.stderr else "Unknown error"
@@ -2893,6 +3066,7 @@ def run_crawl_intraday(max_retries: int = 3):
                     _repair_partition_if_needed(target_date)
                 
                 print("[Scheduler] Intraday crawl completed successfully.")
+                send_ntfy_notification("데이터수집 완료 (Intraday 모드)")
                 with _scheduler_lock:
                     _scheduler_state["intraday_done_today"] = True
                     _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
@@ -2946,7 +3120,12 @@ def run_inference_for_models():
     global _scheduler_state
     print("[Scheduler] Running inference for model1 and model5...")
     
+    notification_msg = []
+    
     try:
+        from ml.inference import get_stock_name_mapping
+        name_map = get_stock_name_mapping()
+        
         for model_name in ['model1', 'model5']:
             print(f"[Scheduler] Running inference for {model_name}...")
             top_candidates = run_inference(
@@ -2962,16 +3141,13 @@ def run_inference_for_models():
             )
             
             if top_candidates is not None and not top_candidates.empty:
-                # DB에 저장
-                from ml.inference import get_stock_name_mapping
-                name_map = get_stock_name_mapping()
-                
                 base_date_val = top_candidates.iloc[0].get('date')
                 if hasattr(base_date_val, 'strftime'):
                     base_date_str = base_date_val.strftime('%Y-%m-%d')
                 else:
                     base_date_str = str(base_date_val)[:10]
                 
+                model_stocks = []
                 with app.app_context():
                     # 중복 제거
                     Recommendation.query.filter_by(
@@ -2984,6 +3160,12 @@ def run_inference_for_models():
                     for _, row in top_candidates.iterrows():
                         code = str(row['code']).zfill(6)
                         name = name_map.get(code, code)
+                        model_stocks.append(name)
+                        
+                        # 스케줄러 자동 분석 (OpenAI GPT 기본 사용)
+                        print(f"[Scheduler] AI Analyzing {name} ({code})...")
+                        ai_analysis = get_stock_analysis_from_openai(name, code)
+                        
                         rec = Recommendation(
                             date=base_date_str,
                             filter_tag='filter2',
@@ -2994,15 +3176,24 @@ def run_inference_for_models():
                             probability=float(row['positive_proba']),
                             expected_return=float(row['expected_return']),
                             market_cap=float(row['market_cap']),
+                            ai_analysis=ai_analysis,
+                            ai_service='openai',
                             created_at=now_ts,
                         )
                         db.session.add(rec)
                     
                     db.session.commit()
                     print(f"[Scheduler] {model_name} inference saved: {len(top_candidates)} stocks for {base_date_str}")
+                    
+                if model_stocks:
+                    notification_msg.append(f"[{model_name}] 추천: {', '.join(model_stocks)}")
         
         with _scheduler_lock:
             _scheduler_state["inference_done_today"] = True
+        
+        if notification_msg:
+            send_ntfy_notification("\n".join(notification_msg))
+            
         print("[Scheduler] All inference completed.")
         
     except Exception as e:
@@ -3072,9 +3263,63 @@ def start_scheduler_thread():
 # 스케줄러 상태 및 크롤링 상태 API
 # =============================
 
+def get_data_range_info() -> dict:
+    """수집된 데이터의 범위 및 상태 정보 반환"""
+    try:
+        if not os.path.isdir(KRX_BARS_DIR):
+            return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": []}
+        
+        dates = []
+        errors = []
+        valid_days = 0
+        
+        for name in os.listdir(KRX_BARS_DIR):
+            d = _parse_partition_date(name)
+            if d:
+                dates.append(d)
+                # parquet 파일 존재 여부 확인
+                part_path = os.path.join(KRX_BARS_DIR, name, "part-0000.parquet")
+                if os.path.exists(part_path):
+                    valid_days += 1
+                else:
+                    errors.append(f"{d.strftime('%Y-%m-%d')}: 파일 없음")
+        
+        if not dates:
+            return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": errors}
+        
+        # 최근 10일 내 누락된 날짜 확인 (주말 제외)
+        min_date = min(dates)
+        max_date = max(dates)
+        dates_set = set(dates)
+        
+        missing_days = []
+        check_date = max_date
+        check_count = 0
+        while check_count < 10 and check_date >= min_date:
+            if check_date.weekday() < 5:  # 평일만
+                if check_date not in dates_set:
+                    missing_days.append(check_date.strftime('%Y-%m-%d'))
+                check_count += 1
+            check_date -= timedelta(days=1)
+        
+        return {
+            "start_date": min_date.strftime('%Y-%m-%d'),
+            "end_date": max_date.strftime('%Y-%m-%d'),
+            "total_days": len(dates),
+            "valid_days": valid_days,
+            "missing_days": missing_days[:5],  # 최근 5개만
+            "errors": errors[:5],  # 최근 5개만
+        }
+    except Exception as e:
+        return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": [str(e)]}
+
+
 @app.route('/api/scheduler/status', methods=['GET'])
 def get_scheduler_status():
     """스케줄러 및 크롤링 상태 조회"""
+    # 데이터 범위 계산
+    data_range = get_data_range_info()
+    
     with _scheduler_lock:
         return jsonify({
             "eod_done_today": _scheduler_state["eod_done_today"],
@@ -3089,6 +3334,13 @@ def get_scheduler_status():
             "last_crawl_mode": _scheduler_state["last_crawl_mode"],
             "last_crawl_date_range": _scheduler_state["last_crawl_date_range"],
             "last_crawl_duration": _scheduler_state["last_crawl_duration"],
+            # 데이터 범위 정보
+            "data_start_date": data_range["start_date"],
+            "data_end_date": data_range["end_date"],
+            "data_total_days": data_range["total_days"],
+            "data_valid_days": data_range["valid_days"],
+            "data_missing_days": data_range["missing_days"],
+            "data_errors": data_range["errors"],
         })
 
 
@@ -3102,12 +3354,15 @@ def trigger_scheduler_task():
             return jsonify({"error": "Another crawling task is already running."}), 400
     
     if task == 'eod':
+        send_ntfy_notification("수동 EOD 수집 시작")
         threading.Thread(target=run_crawl_eod, daemon=True).start()
         return jsonify({"message": "EOD crawl started."})
     elif task == 'intraday':
+        send_ntfy_notification("수동 Intraday 수집 시작")
         threading.Thread(target=run_crawl_intraday, daemon=True).start()
         return jsonify({"message": "Intraday crawl started."})
     elif task == 'inference':
+        send_ntfy_notification("수동 AI 예측 시작")
         threading.Thread(target=run_inference_for_models, daemon=True).start()
         return jsonify({"message": "Inference started."})
     else:
@@ -3146,6 +3401,7 @@ def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
         
         if result.returncode == 0:
             print(f"[Crawler] {mode} crawl ({start_date} ~ {end_date}) completed successfully.")
+            send_ntfy_notification(f"수동 데이터수집 완료 ({mode} 모드, {start_date}~{end_date})")
             with _scheduler_lock:
                 _scheduler_state["last_crawl_completed_at"] = crawl_end_time.isoformat()
                 _scheduler_state["last_crawl_mode"] = f"{mode} (manual)"
@@ -3192,6 +3448,8 @@ def manual_crawl():
     with _scheduler_lock:
         if _scheduler_state["crawling_status"]:
             return jsonify({"error": "Another crawling task is already running."}), 400
+    
+    send_ntfy_notification(f"수동 데이터수집 시작 ({mode} 모드, {start_date}~{end_date})")
     
     # 백그라운드에서 실행
     threading.Thread(
@@ -3690,6 +3948,22 @@ def api_kis_calculate_sell():
         return jsonify({"error": str(e)}), 500
 
 
+# Serve frontend index.html for SPA routing
+@app.route('/')
+def serve_index():
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, 'index.html')):
+        return app.send_static_file('index.html')
+    return jsonify({"message": "MyStocks API Server", "status": "running"}), 200
+
+
+# Catch-all route for SPA
+@app.errorhandler(404)
+def not_found(e):
+    if app.static_folder and os.path.exists(os.path.join(app.static_folder, 'index.html')):
+        return app.send_static_file('index.html')
+    return jsonify({"error": "Not found"}), 404
+
+
 if __name__ == '__main__':
     # 데이터베이스 초기화
     init_db()
@@ -3709,4 +3983,8 @@ if __name__ == '__main__':
     start_scheduler_thread()
     
     print("=== Flask 서버 시작 ===")
-    app.run(debug=True, port=5000, use_reloader=False)  # use_reloader=False to prevent double thread start
+    # Get host and port from environment variables for Docker compatibility
+    host = os.environ.get('FLASK_HOST', '0.0.0.0')
+    port = int(os.environ.get('FLASK_PORT', 5000))
+    debug = os.environ.get('FLASK_ENV', 'production') != 'production'
+    app.run(debug=debug, host=host, port=port, use_reloader=False)  # use_reloader=False to prevent double thread start

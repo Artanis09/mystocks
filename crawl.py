@@ -485,7 +485,8 @@ def update_data_parallel(
         except Exception as e:
             print(f"[WARN] merge failed, fallback to overwrite: {e}")
 
-            _atomic_to_parquet(new_df, save_path)
+    # 새로 저장하거나 merge 실패 시 덮어쓰기
+    _atomic_to_parquet(new_df, save_path)
     print(f"✅ 저장 완료: {save_path} (총 {len(new_df)}개 종목)")
     return save_path
 

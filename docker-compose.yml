@@ -1,0 +1,71 @@
+services:
+  # Frontend Service (Vite React)
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    container_name: mystocks-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - TZ=Asia/Seoul
+    volumes:
+      # Development: mount source for hot reload
+      - ./vite.config.ts:/app/vite.config.ts
+      - ./App.tsx:/app/App.tsx
+      - ./index.tsx:/app/index.tsx
+      - ./index.html:/app/index.html
+      - ./index.css:/app/index.css
+      - ./types.ts:/app/types.ts
+      - ./components:/app/components
+      - ./services:/app/services
+      - ./public:/app/public
+    depends_on:
+      - backend
+    networks:
+      - mystocks-network
+    restart: unless-stopped
+
+  # Backend Service (Flask)
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    container_name: mystocks-backend
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - KIS_APP_KEY=${KIS_APP_KEY}
+      - KIS_APP_SECRET=${KIS_APP_SECRET}
+      - KIS_ACCOUNT_NO=${KIS_ACCOUNT_NO}
+      - DB_PATH=/app/db
+      - TZ=Asia/Seoul
+    volumes:
+      # Source code mount for real-time updates
+      - ./update_stock_prices.py:/app/update_stock_prices.py
+      - ./crawl.py:/app/crawl.py
+      - ./debug_kis.py:/app/debug_kis.py
+      - ./ml:/app/ml
+      - ./scripts:/app/scripts
+      # Persist data directory
+      - ./data:/app/data
+      # Persist database in a directory
+      - db-data:/app/db
+      # Config files
+      - ./config.ini:/app/config.ini
+      - ./.env:/app/.env
+    networks:
+      - mystocks-network
+    restart: unless-stopped
+
+networks:
+  mystocks-network:
+    driver: bridge
+
+volumes:
+  mystocks-data:
+  db-data:

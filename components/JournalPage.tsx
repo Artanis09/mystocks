@@ -16,7 +16,7 @@ import {
 import { Journal, StockGroup } from '../types';
 import { Button } from './Button';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
 const CATEGORIES = ['분석', '복기', '전략', '메모', '뉴스'];
 

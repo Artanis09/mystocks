@@ -152,6 +152,8 @@ export interface RecommendedStock {
   probability: number;
   expected_return: number;
   return_rate?: number;
+  ai_analysis?: string;
+  ai_service?: string;
 }
 
 // Navigation

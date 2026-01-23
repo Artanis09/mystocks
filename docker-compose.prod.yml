@@ -1,0 +1,42 @@
+services:
+  # Production: Combined frontend + backend
+  mystocks:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mystocks-app
+    ports:
+      - "5000:5000"
+    environment:
+      - FLASK_ENV=production
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - KIS_APP_KEY=${KIS_APP_KEY}
+      - KIS_APP_SECRET=${KIS_APP_SECRET}
+      - KIS_ACCOUNT_NO=${KIS_ACCOUNT_NO}
+      - TZ=Asia/Seoul
+    volumes:
+      # Persist data directory
+      - ./data:/app/data
+      # Persist database
+      - ./mystock.db:/app/mystock.db
+      # Config files
+      - ./config.ini:/app/config.ini
+      - ./.env:/app/.env
+    restart: unless-stopped
+
+  # Nginx reverse proxy (optional)
+  nginx:
+    image: nginx:alpine
+    container_name: mystocks-nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - mystocks
+    restart: unless-stopped
+    profiles:
+      - with-nginx

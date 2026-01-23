@@ -36,7 +36,8 @@ import {
 } from 'lucide-react';
 import { RecommendedStock } from '../types';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+// Use relative path for API calls to work with domain/proxy
+const API_BASE_URL = '/api';
 
 interface RecommendationsProps {
   onStockClick: (stock: RecommendedStock) => void;
@@ -265,8 +266,8 @@ const DataCollectionPanel: React.FC<DataCollectionPanelProps> = ({ schedulerStat
             <p className="text-xs text-slate-500">
               {isCrawling 
                 ? `${schedulerStatus?.crawling_status === 'eod' ? 'EOD' : 'Intraday'} 모드로 수집 중...`
-                : (schedulerStatus as any)?.last_crawl_completed_at
-                  ? `최근: ${new Date((schedulerStatus as any).last_crawl_completed_at).toLocaleString('ko-KR')}`
+                : (schedulerStatus as any)?.data_start_date && (schedulerStatus as any)?.data_end_date
+                  ? `${(schedulerStatus as any).data_start_date} ~ ${(schedulerStatus as any).data_end_date} (${(schedulerStatus as any).data_valid_days || 0}일)`
                   : '수동으로 주가 데이터를 수집합니다'}
             </p>
           </div>
@@ -317,32 +318,67 @@ const DataCollectionPanel: React.FC<DataCollectionPanelProps> = ({ schedulerStat
             </div>
           )}
 
-          {/* 최근 수집 완료 정보 */}
-          {!isCrawling && (schedulerStatus as any)?.last_crawl_completed_at && (
-            <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 mb-4 flex items-center gap-3">
-              <div className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm text-white font-medium">최근 수집 완료</p>
-                <p className="text-xs text-slate-400">
-                  {new Date((schedulerStatus as any).last_crawl_completed_at).toLocaleString('ko-KR')}
-                  {' • '}
-                  <span className={`${
-                    (schedulerStatus as any).last_crawl_mode?.includes('auto') 
-                      ? 'text-blue-400' 
-                      : 'text-amber-400'
-                  }`}>
-                    {(schedulerStatus as any).last_crawl_mode}
-                  </span>
-                  {(schedulerStatus as any).last_crawl_date_range && (
-                    <> • {(schedulerStatus as any).last_crawl_date_range}</>
+          {/* 데이터 상태 및 최근 수집 정보 */}
+          {!isCrawling && (
+            <div className="space-y-3 mb-4">
+              {/* 데이터 범위 정보 */}
+              {(schedulerStatus as any)?.data_start_date && (
+                <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3">
+                  <div className="flex items-center gap-3 mb-2">
+                    <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center">
+                      <Database className="w-4 h-4 text-blue-400" />
+                    </div>
+                    <div className="flex-1">
+                      <p className="text-sm text-white font-medium">수집된 데이터 범위</p>
+                      <p className="text-xs text-slate-400">
+                        {(schedulerStatus as any).data_start_date} ~ {(schedulerStatus as any).data_end_date}
+                        {' • '}총 {(schedulerStatus as any).data_total_days}일 / 유효 {(schedulerStatus as any).data_valid_days}일
+                      </p>
+                    </div>
+                  </div>
+                  {/* 누락 날짜 표시 */}
+                  {(schedulerStatus as any).data_missing_days?.length > 0 && (
+                    <div className="mt-2 p-2 bg-amber-500/10 rounded-lg text-xs text-amber-400">
+                      <span className="font-bold">누락 날짜:</span> {(schedulerStatus as any).data_missing_days.join(', ')}
+                    </div>
                   )}
-                  {(schedulerStatus as any).last_crawl_duration && (
-                    <> • 소요: {formatDuration((schedulerStatus as any).last_crawl_duration)}</>
+                  {/* 오류 표시 */}
+                  {(schedulerStatus as any).data_errors?.length > 0 && (
+                    <div className="mt-2 p-2 bg-rose-500/10 rounded-lg text-xs text-rose-400">
+                      <span className="font-bold">오류:</span> {(schedulerStatus as any).data_errors.slice(0, 3).join(', ')}
+                    </div>
                   )}
-                </p>
-              </div>
+                </div>
+              )}
+
+              {/* 최근 수집 완료 정보 */}
+              {(schedulerStatus as any)?.last_crawl_completed_at && (
+                <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-3 flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-lg bg-emerald-500/20 flex items-center justify-center">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                  </div>
+                  <div className="flex-1">
+                    <p className="text-sm text-white font-medium">최근 수집 완료</p>
+                    <p className="text-xs text-slate-400">
+                      {new Date((schedulerStatus as any).last_crawl_completed_at).toLocaleString('ko-KR')}
+                      {' • '}
+                      <span className={`${
+                        (schedulerStatus as any).last_crawl_mode?.includes('auto') 
+                          ? 'text-blue-400' 
+                          : 'text-amber-400'
+                      }`}>
+                        {(schedulerStatus as any).last_crawl_mode}
+                      </span>
+                      {(schedulerStatus as any).last_crawl_date_range && (
+                        <> • {(schedulerStatus as any).last_crawl_date_range}</>
+                      )}
+                      {(schedulerStatus as any).last_crawl_duration && (
+                        <> • 소요: {formatDuration((schedulerStatus as any).last_crawl_duration)}</>
+                      )}
+                    </p>
+                  </div>
+                </div>
+              )}
             </div>
           )}
 
@@ -740,6 +776,11 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   const [isBatchOrdering, setIsBatchOrdering] = useState(false);
   const [batchOrderResult, setBatchOrderResult] = useState<any>(null);
   
+  // AI 분석 상태
+  const [stockAnalyses, setStockAnalyses] = useState<Record<string, string>>({});
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [aiService, setAiService] = useState<'openai' | 'gemini'>('openai');
+  
   // Refs for visibility tracking
   const stockRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -759,6 +800,33 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       }
     } catch (err) {
       console.error('Failed to fetch scheduler status:', err);
+    }
+  };
+
+  // AI 종목 분석 호출
+  const fetchStockAnalyses = async (stocks: { code: string; name: string }[]) => {
+    if (stocks.length === 0) return;
+    
+    setIsAnalyzing(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/stock-analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stocks, ai_service: aiService })
+      });
+      
+      if (response.ok) {
+        const data = await response.json();
+        const analyses: Record<string, string> = {};
+        for (const [code, info] of Object.entries(data.analyses || {})) {
+          analyses[code] = (info as any).analysis || '';
+        }
+        setStockAnalyses(prev => ({ ...prev, ...analyses }));
+      }
+    } catch (err) {
+      console.error('Failed to fetch stock analyses:', err);
+    } finally {
+      setIsAnalyzing(false);
     }
   };
 
@@ -782,7 +850,29 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
           const howToFix = Array.isArray(errData?.how_to_fix) ? `\n\nHow to fix:\n- ${errData.how_to_fix.join('\n- ')}` : '';
           throw new Error(`${baseMsg}${backendPython}${howToFix}`);
         }
-        await fetchRecommendations(filterTag, false);
+        
+        // 예측 성공 후 추천 목록 다시 조회
+        const recResponse = await fetch(`${API_BASE_URL}/recommendations?filter=${filterTag}&model=${modelName}`);
+        if (recResponse.ok) {
+          const data = await recResponse.json();
+          const processed = data.map((item: any) => ({
+            ...item,
+            close: item.base_price || item.close,
+          }));
+          setRecommendationsByFilter(prev => ({ ...prev, [filterTag]: processed }));
+          
+          setExpandedDates(prev => {
+            const newSet = new Set(prev);
+            newSet.add(today);
+            return newSet;
+          });
+          
+          // AI 예측 완료 후 오늘 추천 종목 5개에 대해 OpenAI 분석 호출
+          const todayStocks = processed.filter((s: any) => s.date === today).slice(0, 5);
+          if (todayStocks.length > 0) {
+            fetchStockAnalyses(todayStocks.map((s: any) => ({ code: s.code, name: s.name })));
+          }
+        }
       } catch (err: any) {
         setErrorByFilter(prev => ({ ...prev, [filterTag]: err.message || 'AI 분석 중 오류가 발생했습니다' }));
         console.error(err);
@@ -1408,100 +1498,138 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                             key={`${filterTag}_${stock.id || stock.code}_${idx}`}
                             ref={(el) => setStockRowRef(stock.code, el)}
                             data-code={stock.code}
-                            onClick={() => onStockClick(stock)}
-                            className={`grid grid-cols-12 gap-4 p-4 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group items-center ${
+                            className={`border-b border-slate-800/50 hover:bg-slate-800/50 transition-colors group ${
                               selectedStocks.has(stock.code) ? 'bg-point-cyan/5' : ''
                             }`}
                           >
-                            {/* Checkbox */}
-                            <div className="col-span-1 flex justify-center">
-                              <button
-                                onClick={(e) => handleSelectStock(e, stock.code)}
-                                className="hover:scale-110 transition-transform"
-                              >
-                                {selectedStocks.has(stock.code) 
-                                  ? <CheckSquare className="w-5 h-5 text-point-cyan" />
-                                  : <Square className="w-5 h-5 text-slate-600 hover:text-slate-400" />
-                                }
-                              </button>
-                            </div>
-
-                            {/* Name & Code */}
-                            <div className="col-span-3 flex flex-col justify-center pl-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-white font-bold group-hover:text-point-cyan transition-colors truncate">{stock.name}</span>
-                                {stock.probability >= 0.9 && (
-                                  <Zap className="w-3 h-3 text-yellow-400 fill-yellow-400" />
-                                )}
+                            {/* 종목 정보 행 */}
+                            <div 
+                              onClick={() => onStockClick(stock)}
+                              className="grid grid-cols-12 gap-4 p-4 cursor-pointer items-center"
+                            >
+                              {/* Checkbox */}
+                              <div className="col-span-1 flex justify-center">
+                                <button
+                                  onClick={(e) => handleSelectStock(e, stock.code)}
+                                  className="hover:scale-110 transition-transform"
+                                >
+                                  {selectedStocks.has(stock.code) 
+                                    ? <CheckSquare className="w-5 h-5 text-point-cyan" />
+                                    : <Square className="w-5 h-5 text-slate-600 hover:text-slate-400" />
+                                  }
+                                </button>
                               </div>
-                              <span className="text-xs text-slate-500 font-mono">{stock.code} · {formatMarketCap(stock.market_cap)}</span>
-                            </div>
 
-                            {/* Base Price */}
-                            <div className="col-span-2 text-right text-slate-400 font-mono text-sm">
-                              {formatPrice(stock.base_price)}원
-                            </div>
-
-                            {/* Current Price & Return Rate */}
-                            <div className="col-span-2 text-right">
-                              <div className="font-mono text-sm font-bold text-white mb-0.5 flex items-center justify-end gap-1">
-                                {formatPrice(currentPrice)}원
-                                {priceSource === 'realtime' && (
-                                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="실시간" />
-                                )}
-                                {priceSource === 'local' && (
-                                  <span className="w-2 h-2 rounded-full bg-amber-400" title="장중" />
-                                )}
-                                {priceSource === 'base' && (
-                                  <span className="w-2 h-2 rounded-full bg-slate-500" title="기준가" />
-                                )}
-                              </div>
-                              <div className="flex flex-col items-end">
-                                <div className={`text-[10px] font-bold ${
-                                  currentChange >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                                }`}>
-                                  당일 {currentChange >= 0 ? '+' : ''}{currentChange.toFixed(2)}%
+                              {/* Name & Code */}
+                              <div className="col-span-3 flex flex-col justify-center pl-2">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-white font-bold group-hover:text-point-cyan transition-colors truncate">{stock.name}</span>
+                                  {stock.probability >= 0.9 && (
+                                    <Zap className="w-3 h-3 text-yellow-400 fill-yellow-400" />
+                                  )}
                                 </div>
-                                <div className={`text-xs font-bold px-1.5 py-0.5 rounded-md mt-0.5 ${
-                                  isPositive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
-                                }`}>
-                                  추천대비 {isPositive ? '+' : ''}{returnRate.toFixed(2)}%
+                                <span className="text-xs text-slate-500 font-mono">{stock.code} · {formatMarketCap(stock.market_cap)}</span>
+                              </div>
+
+                              {/* Base Price */}
+                              <div className="col-span-2 text-right text-slate-400 font-mono text-sm">
+                                {formatPrice(stock.base_price)}원
+                              </div>
+
+                              {/* Current Price & Return Rate */}
+                              <div className="col-span-2 text-right">
+                                <div className="font-mono text-sm font-bold text-white mb-0.5 flex items-center justify-end gap-1">
+                                  {formatPrice(currentPrice)}원
+                                  {priceSource === 'realtime' && (
+                                    <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="실시간" />
+                                  )}
+                                  {priceSource === 'local' && (
+                                    <span className="w-2 h-2 rounded-full bg-amber-400" title="장중" />
+                                  )}
+                                  {priceSource === 'base' && (
+                                    <span className="w-2 h-2 rounded-full bg-slate-500" title="기준가" />
+                                  )}
+                                </div>
+                                <div className="flex flex-col items-end">
+                                  <div className={`text-[10px] font-bold ${
+                                    currentChange >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                                  }`}>
+                                    당일 {currentChange >= 0 ? '+' : ''}{currentChange.toFixed(2)}%
+                                  </div>
+                                  <div className={`text-xs font-bold px-1.5 py-0.5 rounded-md mt-0.5 ${
+                                    isPositive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'
+                                  }`}>
+                                    추천대비 {isPositive ? '+' : ''}{returnRate.toFixed(2)}%
+                                  </div>
                                 </div>
                               </div>
-                            </div>
 
-                            {/* Probability */}
-                            <div className="col-span-1 text-right">
-                              <span className="text-sm font-bold text-point-cyan">{formatPercent(stock.probability)}</span>
-                            </div>
+                              {/* Probability */}
+                              <div className="col-span-1 text-right">
+                                <span className="text-sm font-bold text-point-cyan">{formatPercent(stock.probability)}</span>
+                              </div>
 
-                            {/* Expected Return */}
-                            <div className="col-span-1 text-right">
-                              <span className="text-sm font-bold text-emerald-400">+{formatPercent(stock.expected_return)}</span>
-                            </div>
+                              {/* Expected Return */}
+                              <div className="col-span-1 text-right">
+                                <span className="text-sm font-bold text-emerald-400">+{formatPercent(stock.expected_return)}</span>
+                              </div>
 
-                            {/* Action Buttons */}
-                            <div className="col-span-2 flex items-center justify-center gap-1">
-                              <button
-                                onClick={(e) => handleDeleteStock(e, stock)}
-                                className="p-1.5 hover:bg-slate-700 text-slate-500 hover:text-slate-300 rounded-lg transition-all"
-                                title="삭제"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                              <button
-                                onClick={(e) => handleSell(e, stock)}
-                                className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
-                              >
-                                <Banknote className="w-3 h-3" /> 매도
-                              </button>
-                              <button
-                                onClick={(e) => handleBuy(e, stock)}
-                                className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
-                              >
-                                <ShoppingCart className="w-3 h-3" /> 매수
-                              </button>
+                              {/* Action Buttons */}
+                              <div className="col-span-2 flex items-center justify-center gap-1">
+                                <button
+                                  onClick={(e) => handleDeleteStock(e, stock)}
+                                  className="p-1.5 hover:bg-slate-700 text-slate-500 hover:text-slate-300 rounded-lg transition-all"
+                                  title="삭제"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={(e) => handleSell(e, stock)}
+                                  className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
+                                >
+                                  <Banknote className="w-3 h-3" /> 매도
+                                </button>
+                                <button
+                                  onClick={(e) => handleBuy(e, stock)}
+                                  className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1"
+                                >
+                                  <ShoppingCart className="w-3 h-3" /> 매수
+                                </button>
+                              </div>
                             </div>
+                            
+                            {/* AI 분석 결과 (전체 넓이) */}
+                            {(stock.ai_analysis || stockAnalyses[stock.code] || (isAnalyzing && date === today && idx < 5)) && (
+                              <div className="px-4 pb-3">
+                                {(stock.ai_analysis || stockAnalyses[stock.code]) ? (
+                                  <div className={`text-xs leading-relaxed p-3 rounded-lg ${
+                                    (stock.ai_analysis || stockAnalyses[stock.code]).includes('매매금지') 
+                                      ? 'text-rose-300 bg-rose-500/10 border border-rose-500/30' 
+                                      : 'text-slate-300 bg-slate-800/50 border border-slate-700'
+                                  }`}>
+                                    <div className="flex items-start gap-2">
+                                      <div className="flex flex-col items-center gap-1">
+                                        <BrainCircuit className="w-4 h-4 mt-0.5 flex-shrink-0 text-violet-400" />
+                                        {(stock.ai_service || (stockAnalyses[stock.code] && aiService)) && (
+                                          <span className="text-[8px] text-violet-500/70 font-bold uppercase leading-none">
+                                            {stock.ai_service || aiService}
+                                          </span>
+                                        )}
+                                      </div>
+                                      <div className="flex-1">
+                                        {(stock.ai_analysis || stockAnalyses[stock.code]).split('\n').map((line, i) => (
+                                          <div key={i} className="mb-0.5">{line}</div>
+                                        ))}
+                                      </div>
+                                    </div>
+                                  </div>
+                                ) : (
+                                  <div className="text-xs text-slate-500 flex items-center gap-2 p-2">
+                                    <Loader2 className="w-4 h-4 animate-spin" /> {aiService === 'google' ? 'Gemini' : 'GPT'} 분석 중...
+                                  </div>
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       })}
@@ -1558,6 +1686,30 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
               )}
             </div>
           )}
+
+          <label className="text-sm text-slate-400 font-semibold">AI 서비스</label>
+          <div className="flex rounded-xl overflow-hidden border border-slate-700">
+            <button
+              onClick={() => setAiService('openai')}
+              className={`px-3 py-2 text-xs font-bold transition-all ${
+                aiService === 'openai' 
+                  ? 'bg-emerald-500 text-white' 
+                  : 'bg-[#1a1f2e] text-slate-400 hover:text-white'
+              }`}
+            >
+              GPT
+            </button>
+            <button
+              onClick={() => setAiService('gemini')}
+              className={`px-3 py-2 text-xs font-bold transition-all ${
+                aiService === 'gemini' 
+                  ? 'bg-blue-500 text-white' 
+                  : 'bg-[#1a1f2e] text-slate-400 hover:text-white'
+              }`}
+            >
+              Gemini
+            </button>
+          </div>
 
           <label className="text-sm text-slate-400 font-semibold">모델 선택</label>
           <select
@@ -1715,20 +1867,20 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
             {/* 일괄 매수/매도 버튼 */}
             <div className="flex gap-3">
               <button
-                onClick={handleBatchSell}
-                disabled={selectedStocks.size === 0 || isBatchOrdering}
-                className="flex-1 bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 py-2.5 rounded-xl font-bold transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {isBatchOrdering ? <Loader2 className="w-4 h-4 animate-spin" /> : <Banknote className="w-4 h-4" />}
-                선택종목 일괄 매도 ({selectedStocks.size})
-              </button>
-              <button
                 onClick={handleBatchBuy}
                 disabled={selectedStocks.size === 0 || isBatchOrdering}
                 className="flex-1 bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 py-2.5 rounded-xl font-bold transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 {isBatchOrdering ? <Loader2 className="w-4 h-4 animate-spin" /> : <ShoppingCart className="w-4 h-4" />}
                 선택종목 일괄 매수 ({selectedStocks.size})
+              </button>
+              <button
+                onClick={handleBatchSell}
+                disabled={selectedStocks.size === 0 || isBatchOrdering}
+                className="flex-1 bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 py-2.5 rounded-xl font-bold transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isBatchOrdering ? <Loader2 className="w-4 h-4 animate-spin" /> : <Banknote className="w-4 h-4" />}
+                선택종목 일괄 매도 ({selectedStocks.size})
               </button>
             </div>
 
@@ -1755,7 +1907,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       <div className="space-y-12">
         {renderSection(
           'filter2',
-          '필터2 (최종 적용)',
+          `AI 추천 (${modelName === 'model1' ? 'CatBoost' : 'LightGBM'})`,
           'Prob≥70% + 시총≥500억 + Daily≥-5% + return_1d[-5%,29.5%)'
         )}
       </div>

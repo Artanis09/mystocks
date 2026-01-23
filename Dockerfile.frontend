@@ -1,0 +1,23 @@
+# Frontend Development/Production Dockerfile
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package.json package-lock.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Copy all frontend source files
+COPY *.tsx *.ts *.css *.html ./
+COPY components/ ./components/
+COPY services/ ./services/
+COPY public/ ./public/
+COPY vite.config.ts tsconfig.json ./
+
+# Expose Vite dev server port
+EXPOSE 3000
+
+# Start development server
+CMD ["npm", "run", "dev"]

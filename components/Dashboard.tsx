@@ -23,7 +23,7 @@ import {
   Legend
 } from 'recharts';
 
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
 export const Dashboard: React.FC = () => {
   const [indices, setIndices] = useState<{ kospi: MarketIndex; kosdaq: MarketIndex } | null>(null);

@@ -35,7 +35,7 @@ export interface StockDetailInfo {
 
 const STOCK_CACHE_KEY = 'stock_details_cache';
 const CACHE_DURATION = 24 * 60 * 60 * 1000; // 24시간
-const API_BASE_URL = 'http://localhost:5000/api';
+const API_BASE_URL = '/api';
 
 export const getRecommendations = async (): Promise<RecommendedStock[]> => {
   try {
@@ -159,7 +159,7 @@ export const isETFName = (name: string): boolean => {
 // ETF 종목코드로 직접 KIS API 조회
 export const lookupETFByCode = async (code: string): Promise<StockBasicInfo | null> => {
   try {
-    const response = await fetch(`http://localhost:5000/api/etf-lookup/${code}`);
+    const response = await fetch(`/api/etf-lookup/${code}`);
     if (!response.ok) return null;
     
     const result = await response.json();
@@ -185,7 +185,7 @@ export const lookupETFByCode = async (code: string): Promise<StockBasicInfo | nu
 // ETF 검색 (백엔드 API 사용)
 export const searchETF = async (query: string): Promise<StockBasicInfo[]> => {
   try {
-    const response = await fetch(`http://localhost:5000/api/etf-search?q=${encodeURIComponent(query)}`);
+    const response = await fetch(`/api/etf-search?q=${encodeURIComponent(query)}`);
     if (!response.ok) return [];
     
     const result = await response.json();
@@ -217,7 +217,7 @@ export const getStockDetail = async (code: string): Promise<StockDetailInfo | nu
 
     // 1) backend merged info
     try {
-      const res = await fetch(`http://localhost:5000/api/stock-info/${encodeURIComponent(code)}`);
+      const res = await fetch(`/api/stock-info/${encodeURIComponent(code)}`);
       if (res.ok) {
         const j = await res.json();
         if (j.success && j.data) {

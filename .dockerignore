@@ -1,0 +1,48 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.Python
+.venv
+venv
+env
+*.egg-info
+.eggs
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Build outputs
+dist
+build
+
+# Docker
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Documentation
+*.md
+!README.md
+
+# Misc
+.env.local
+.env.*.local
+*.log
+flask_output.txt
+*.xlsx
+
+# Large data files (optional - uncomment if you want to exclude)
+# data/

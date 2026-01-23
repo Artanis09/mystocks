@@ -104,7 +104,7 @@ export const AddStockModal: React.FC<AddStockModalProps> = ({ onClose, onAdd, ex
       if (matchedStocks.length > 0) {
         // 등록된 종목들에 대해 데이터 업데이트
         try {
-          const response = await fetch('http://localhost:5000/update-stocks', {
+          const response = await fetch('/update-stocks', {
             method: 'POST',
             headers: {
               'Content-Type': 'application/json',
