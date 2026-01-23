@@ -3,7 +3,10 @@
 <html lang="ko" class="dark">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="theme-color" content="#0f121d">
   <title>마이스탁 | 나만의 주식 분석 일지</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
@@ -43,6 +46,7 @@
       font-family: 'Pretendard', sans-serif; 
       background-color: #0f121d; /* 너무 어둡지 않은 네이비 블랙 */
       color: #e2e8f0; 
+      -webkit-tap-highlight-color: transparent;
     }
     .flat-green { color: #22c55e; }
     .flat-orange { color: #f97316; }
@@ -64,6 +68,63 @@
     }
     .custom-scrollbar::-webkit-scrollbar-thumb:hover {
       background: #475569;
+    }
+
+    /* iOS Safe Area 지원 */
+    .safe-area-top {
+      padding-top: env(safe-area-inset-top, 0);
+    }
+    .safe-area-bottom {
+      padding-bottom: env(safe-area-inset-bottom, 0);
+    }
+
+    /* 모바일 터치 최적화 */
+    @media (max-width: 768px) {
+      body {
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: contain;
+      }
+      
+      input, select, button {
+        font-size: 16px; /* iOS 자동 줌 방지 */
+      }
+
+      /* 모바일에서 스크롤바 숨기기 */
+      ::-webkit-scrollbar {
+        width: 0;
+        height: 0;
+      }
+    }
+
+    /* 애니메이션 */
+    @keyframes slideInFromTop {
+      from {
+        opacity: 0;
+        transform: translateY(-10px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes slideInFromRight {
+      from {
+        opacity: 0;
+        transform: translateX(100%);
+      }
+      to {
+        opacity: 1;
+        transform: translateX(0);
+      }
+    }
+
+    .animate-slide-in-top {
+      animation: slideInFromTop 0.2s ease-out;
+    }
+
+    .animate-slide-in-right {
+      animation: slideInFromRight 0.3s ease-out;
     }
   </style>
 <script type="importmap">

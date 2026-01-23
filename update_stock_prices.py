@@ -366,8 +366,27 @@ def init_db():
 # 한국투자증권 API 설정
 APP_KEY = os.getenv("KIS_APP_KEY")
 APP_SECRET = os.getenv("KIS_APP_SECRET")
+KIS_MOCK = os.getenv("KIS_MOCK", "false").lower() == "true"  # 모의투자 여부 (기본: 실전투자)
 ACCESS_TOKEN = None
 TOKEN_FILE = "kis_token.json"
+
+# TR ID 매핑 (모의투자 vs 실전투자)
+def get_tr_id(base_tr_id: str) -> str:
+    """모의투자/실전투자 환경에 맞는 TR ID 반환
+    
+    모의투자 TR ID는 'V'로 시작, 실전투자는 'T'로 시작
+    """
+    if KIS_MOCK:
+        # 모의투자: T -> V로 변경
+        if base_tr_id.startswith("T"):
+            return "V" + base_tr_id[1:]
+    return base_tr_id
+
+def get_kis_base_url() -> str:
+    """모의투자/실전투자 환경에 맞는 기본 URL 반환"""
+    if KIS_MOCK:
+        return "https://openapivts.koreainvestment.com:29443"
+    return "https://openapi.koreainvestment.com:9443"
 
 
 def save_token(token_data):
@@ -408,8 +427,9 @@ def get_kis_access_token():
                 print("파일에서 토큰 로드 성공")
                 return ACCESS_TOKEN
     
-    # 새 토큰 발급
-    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+    # 새 토큰 발급 (모의투자/실전투자 URL 구분)
+    base_url = get_kis_base_url()
+    url = f"{base_url}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {
         "grant_type": "client_credentials",
@@ -417,7 +437,7 @@ def get_kis_access_token():
         "appsecret": APP_SECRET
     }
     
-    print("KIS 토큰 발급 요청...")
+    print(f"KIS 토큰 발급 요청... (모의투자: {KIS_MOCK})")
     
     try:
         response = requests.post(url, headers=headers, json=body, timeout=10)
@@ -1259,6 +1279,10 @@ def update_recommendations():
             for _, row in top_candidates.iterrows():
                 code = str(row['code']).zfill(6)
                 name = name_map.get(code, code)
+                
+                # AI 분석 수행 (OpenAI GPT 사용)
+                print(f"[Manual Predict] AI Analyzing {name} ({code})...")
+                ai_analysis = get_stock_analysis_from_openai(name, code)
 
                 rec = Recommendation(
                     date=base_date_str,
@@ -1270,6 +1294,8 @@ def update_recommendations():
                     probability=float(row['positive_proba']),
                     expected_return=float(row['expected_return']),
                     market_cap=float(row['market_cap']),
+                    ai_analysis=ai_analysis,
+                    ai_service='openai',
                     created_at=now_ts,
                 )
                 db.session.add(rec)
@@ -2787,7 +2813,7 @@ def test_notification_api():
 STOCK_ANALYSIS_PROMPT = """당신은 한국 주식 시장 전문 애널리스트입니다.
 종목명: {stock_name} (종목코드: {stock_code})
 
-각 종목의 가장 최신뉴스들을 분석하여, 상장폐지나 거래정지 등 크리티컬한 위험 요소가 있다면 "⚠️ 매매금지" 메시지를 주세요.
+각 종목의 가장 최신뉴스들을 검색하고 분석하여, 상장폐지나 거래정지 등 크리티컬한 위험 요소와 관련한 뉴스가 있다면 "⚠️ 매매금지" 메시지를 주세요.
 최신뉴스와 오늘의 트렌드 관점에서 다음날까지의 단기보유 관점에서 참고 또는 주의할점, 매매를 한다면 손익비 관점에서의 진입, 탈출 등에 관한 조언을 3줄 이하로 요약해주세요.
 
 응답 형식:
@@ -3548,19 +3574,108 @@ KIS_ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")  # 예: "12345678-01"
 # 자산 히스토리 (간단한 메모리 저장, 실제 서비스에서는 DB 사용)
 _asset_history = []
 
+# 실전/모의투자 전환용 키 저장 (환경변수에서 로드)
+# ⚠️ 보안 주의: API 키는 반드시 환경변수(.env)에 설정하세요. 코드에 직접 입력하지 마세요!
+KIS_KEYS = {
+    "mock": {
+        "app_key": os.getenv("KIS_APP_KEY"),
+        "app_secret": os.getenv("KIS_APP_SECRET"),
+        "account_no": os.getenv("KIS_ACCOUNT_NO", ""),
+    },
+    "real": {
+        "app_key": os.getenv("KIS_REAL_APP_KEY", ""),
+        "app_secret": os.getenv("KIS_REAL_APP_SECRET", ""),
+        "account_no": os.getenv("KIS_REAL_ACCOUNT_NO", ""),
+    }
+}
+
+@app.route('/api/kis/trading-mode', methods=['GET'])
+def api_kis_trading_mode():
+    """현재 투자 모드 조회 (실전/모의)"""
+    global KIS_MOCK
+    return jsonify({
+        "success": True,
+        "mode": "mock" if KIS_MOCK else "real",
+        "label": "모의투자" if KIS_MOCK else "실전투자",
+        "account_no": KIS_ACCOUNT_NO,
+        "url": get_kis_base_url()
+    })
+
+@app.route('/api/kis/trading-mode', methods=['POST'])
+def api_kis_switch_trading_mode():
+    """투자 모드 전환 (실전/모의)
+    
+    Body: {"mode": "mock" 또는 "real"}
+    """
+    global KIS_MOCK, APP_KEY, APP_SECRET, KIS_ACCOUNT_NO, ACCESS_TOKEN
+    
+    try:
+        data = request.get_json()
+        mode = data.get("mode", "mock")
+        
+        if mode not in ["mock", "real"]:
+            return jsonify({"success": False, "error": "mode는 'mock' 또는 'real'이어야 합니다."}), 400
+        
+        # 전환 수행
+        new_keys = KIS_KEYS.get(mode, KIS_KEYS["mock"])
+        
+        # 키 유효성 검사
+        if not new_keys["app_key"] or not new_keys["app_secret"]:
+            return jsonify({
+                "success": False,
+                "error": f"{mode} 모드에 필요한 API 키가 설정되지 않았습니다.",
+                "hint": f"환경변수에 {'KIS_REAL_APP_KEY/KIS_REAL_APP_SECRET' if mode == 'real' else 'KIS_APP_KEY/KIS_APP_SECRET'}을 설정하세요."
+            }), 400
+        
+        # 글로벌 변수 업데이트
+        KIS_MOCK = (mode == "mock")
+        APP_KEY = new_keys["app_key"]
+        APP_SECRET = new_keys["app_secret"]
+        KIS_ACCOUNT_NO = new_keys["account_no"]
+        
+        # 토큰 초기화 (새로운 키로 재발급 필요)
+        ACCESS_TOKEN = None
+        
+        # 토큰 파일 삭제 (새로 발급받도록)
+        try:
+            if os.path.exists(TOKEN_FILE):
+                os.remove(TOKEN_FILE)
+        except Exception:
+            pass
+        
+        print(f"[KIS] 투자모드 전환: {mode} (계좌: {KIS_ACCOUNT_NO})")
+        
+        return jsonify({
+            "success": True,
+            "mode": mode,
+            "label": "모의투자" if mode == "mock" else "실전투자",
+            "account_no": KIS_ACCOUNT_NO,
+            "url": get_kis_base_url(),
+            "message": f"{'모의투자' if mode == 'mock' else '실전투자'} 모드로 전환되었습니다."
+        })
+        
+    except Exception as e:
+        print(f"투자모드 전환 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET", body=None):
     """KIS 트레이딩 API 호출 (계좌 조회, 주문 등)"""
     token = get_kis_access_token()
     if not token:
         return {"error": "토큰 발급 실패"}
     
-    url = f"https://openapi.koreainvestment.com:9443{endpoint}"
+    # 모의투자/실전투자에 맞는 TR ID와 URL 사용
+    actual_tr_id = get_tr_id(tr_id)
+    base_url = get_kis_base_url()
+    
+    url = f"{base_url}{endpoint}"
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
-        "tr_id": tr_id,
+        "tr_id": actual_tr_id,
         "custtype": "P"
     }
     
@@ -3570,8 +3685,9 @@ def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET",
         else:
             response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        print(f"KIS Trading API [{tr_id}] 응답: {response.status_code}")
+        print(f"KIS Trading API [{actual_tr_id}] 응답: {response.status_code}")
         if response.status_code != 200:
+            print(f"KIS Trading API 상세 오류: {response.text}")
             return {"error": f"API 오류: {response.status_code}", "detail": response.text}
         
         return response.json()

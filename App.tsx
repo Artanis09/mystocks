@@ -2,6 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import { StockGroup, StockData, PageType, RecommendedStock } from './types';
 import { Sidebar } from './components/Sidebar';
+import { MobileNav } from './components/MobileNav';
 import { Dashboard } from './components/Dashboard';
 import { JournalPage } from './components/JournalPage';
 import { Recommendations } from './components/Recommendations';
@@ -10,6 +11,7 @@ import { StockDetail } from './components/StockDetail';
 import { AddStockModal } from './components/AddStockModal';
 import { GroupReturnsPanel } from './components/GroupReturnsPanel';
 import { Button } from './components/Button';
+import { useResponsive } from './hooks/useResponsive';
 import { 
   Search, 
   PlusCircle, 
@@ -43,6 +45,9 @@ const App: React.FC = () => {
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [groupReturns, setGroupReturns] = useState<{ [key: string]: GroupReturnSummary }>({});
   const [selectedRecStock, setSelectedRecStock] = useState<StockData | null>(null);
+
+  // 반응형 디바이스 정보
+  const { isMobile, isTablet } = useResponsive();
 
   // 그룹별 수익률 로드
   const loadGroupReturns = async (groupIds: string[]) => {
@@ -488,20 +493,34 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen flex bg-[#0f121d] text-slate-200 selection:bg-point-cyan/30">
-      {/* Sidebar */}
-      <Sidebar 
-        currentPage={currentPage} 
-        onPageChange={(page) => {
-          setCurrentPage(page);
-          setSelectedStockId(null);
-          setSelectedRecStock(null);
-        }} 
-      />
+    <div className="min-h-screen flex flex-col md:flex-row bg-[#0f121d] text-slate-200 selection:bg-point-cyan/30">
+      {/* 모바일 네비게이션 */}
+      {isMobile && (
+        <MobileNav 
+          currentPage={currentPage} 
+          onPageChange={(page) => {
+            setCurrentPage(page);
+            setSelectedStockId(null);
+            setSelectedRecStock(null);
+          }} 
+        />
+      )}
+
+      {/* 데스크톱/태블릿 사이드바 */}
+      {!isMobile && (
+        <Sidebar 
+          currentPage={currentPage} 
+          onPageChange={(page) => {
+            setCurrentPage(page);
+            setSelectedStockId(null);
+            setSelectedRecStock(null);
+          }} 
+        />
+      )}
 
       {/* Main Content */}
-      <main className="flex-1 p-8 overflow-auto">
-        <div className="max-w-7xl mx-auto">
+      <main className={`flex-1 overflow-auto ${isMobile ? 'pt-16 pb-4 px-3' : 'p-8'}`}>
+        <div className={`mx-auto ${isMobile ? 'max-w-full' : 'max-w-7xl'}`}>
           {renderMainContent()}
         </div>
       </main>

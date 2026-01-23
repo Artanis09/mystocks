@@ -10,6 +10,7 @@ import {
   RefreshCw
 } from 'lucide-react';
 import { MarketIndex, MarketInvestorTrend } from '../types';
+import { useResponsive } from '../hooks/useResponsive';
 import { 
   AreaChart, 
   Area, 
@@ -26,6 +27,7 @@ import {
 const API_BASE_URL = '/api';
 
 export const Dashboard: React.FC = () => {
+  const { isMobile } = useResponsive();
   const [indices, setIndices] = useState<{ kospi: MarketIndex; kosdaq: MarketIndex } | null>(null);
   const [investorTrends, setInvestorTrends] = useState<MarketInvestorTrend[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -76,23 +78,23 @@ export const Dashboard: React.FC = () => {
   const IndexCard: React.FC<{ index: MarketIndex; color: string }> = ({ index, color }) => {
     const isPositive = index.change >= 0;
     return (
-      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl p-6 hover:border-${color}/30 transition-all`}>
+      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'} hover:border-${color}/30 transition-all`}>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-lg font-bold text-white">{index.name}</h3>
+          <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white`}>{index.name}</h3>
           <div className={`p-2 rounded-lg ${isPositive ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}>
-            {isPositive ? <TrendingUp className="w-5 h-5 text-emerald-400" /> : <TrendingDown className="w-5 h-5 text-rose-400" />}
+            {isPositive ? <TrendingUp className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-emerald-400`} /> : <TrendingDown className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-rose-400`} />}
           </div>
         </div>
         
         <div className="space-y-3">
-          <div className="text-3xl font-black text-white">{formatNumber(Math.round(index.currentValue * 100) / 100)}</div>
+          <div className={`${isMobile ? 'text-2xl' : 'text-3xl'} font-black text-white`}>{formatNumber(Math.round(index.currentValue * 100) / 100)}</div>
           
           <div className="flex items-center gap-3">
-            <span className={`flex items-center gap-1 text-sm font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
+            <span className={`flex items-center gap-1 ${isMobile ? 'text-xs' : 'text-sm'} font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
               {isPositive ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
               {isPositive ? '+' : ''}{formatNumber(Math.round(index.change * 100) / 100)}
             </span>
-            <span className={`text-sm font-bold px-2 py-0.5 rounded ${isPositive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
+            <span className={`${isMobile ? 'text-xs' : 'text-sm'} font-bold px-2 py-0.5 rounded ${isPositive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
               {isPositive ? '+' : ''}{(Math.round(index.changePercent * 100) / 100).toFixed(2)}%
             </span>
           </div>
@@ -128,20 +130,20 @@ export const Dashboard: React.FC = () => {
   }
 
   return (
-    <div className="space-y-8">
+    <div className={`space-y-${isMobile ? '4' : '8'}`}>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-black text-white tracking-tight">시장 대시보드</h1>
-          <p className="text-slate-500 font-bold mt-1">실시간 시장 지수 및 투자자 동향</p>
+          <h1 className={`${isMobile ? 'text-xl' : 'text-3xl'} font-black text-white tracking-tight`}>시장 대시보드</h1>
+          <p className={`text-slate-500 font-bold mt-1 ${isMobile ? 'text-xs' : ''}`}>실시간 시장 지수 및 투자자 동향</p>
         </div>
         <button 
           onClick={loadData}
           disabled={isLoading}
-          className="flex items-center gap-2 bg-[#1a1f2e] border border-slate-700 text-slate-400 hover:text-white hover:border-slate-600 px-4 py-2 rounded-xl text-sm font-bold transition-all disabled:opacity-50"
+          className={`flex items-center gap-2 bg-[#1a1f2e] border border-slate-700 text-slate-400 hover:text-white hover:border-slate-600 ${isMobile ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} rounded-xl font-bold transition-all disabled:opacity-50`}
         >
-          <RefreshCw className={`w-4 h-4 ${isLoading ? 'animate-spin' : ''}`} />
-          새로고침
+          <RefreshCw className={`${isMobile ? 'w-3 h-3' : 'w-4 h-4'} ${isLoading ? 'animate-spin' : ''}`} />
+          {!isMobile && '새로고침'}
         </button>
       </div>
 
@@ -153,20 +155,20 @@ export const Dashboard: React.FC = () => {
 
       {/* Market Indices */}
       {indices && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div className={`grid ${isMobile ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 gap-6'}`}>
           <IndexCard index={indices.kospi} color="point-cyan" />
           <IndexCard index={indices.kosdaq} color="violet" />
         </div>
       )}
 
       {/* Investor Trends Chart */}
-      <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-6">
-        <div className="flex items-center justify-between mb-6">
+      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+        <div className={`flex ${isMobile ? 'flex-col gap-3' : 'items-center justify-between'} mb-6`}>
           <div>
-            <h3 className="text-lg font-bold text-white">투자자별 매매동향 (KOSPI)</h3>
-            <p className="text-sm text-slate-500 mt-1">최근 20일간 순매수 추이</p>
+            <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white`}>투자자별 매매동향 (KOSPI)</h3>
+            <p className={`${isMobile ? 'text-xs' : 'text-sm'} text-slate-500 mt-1`}>최근 20일간 순매수 추이</p>
           </div>
-          <div className="flex items-center gap-4 text-xs">
+          <div className={`flex items-center gap-${isMobile ? '3' : '4'} text-xs`}>
             <div className="flex items-center gap-2">
               <Users className="w-4 h-4 text-amber-400" />
               <span className="text-slate-400">개인</span>
@@ -183,7 +185,7 @@ export const Dashboard: React.FC = () => {
         </div>
 
         {investorTrends.length > 0 ? (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height={isMobile ? 200 : 300}>
             <BarChart data={[...investorTrends].reverse().slice(-15)}>
               <XAxis 
                 dataKey="date" 
@@ -223,36 +225,36 @@ export const Dashboard: React.FC = () => {
 
       {/* Quick Stats */}
       {investorTrends.length > 0 && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className={`grid ${isMobile ? 'grid-cols-3 gap-2' : 'grid-cols-1 md:grid-cols-3 gap-4'}`}>
           {(() => {
             const latestTrend = investorTrends[0] || { individual: 0, foreign: 0, institution: 0 };
             return (
               <>
-                <div className="bg-[#1a1f2e] border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Users className="w-5 h-5 text-amber-400" />
-                    <span className="text-sm font-bold text-slate-400">개인 순매수</span>
+                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
+                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
+                    <Users className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-amber-400`} />
+                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '개인' : '개인 순매수'}</span>
                   </div>
-                  <div className={`text-xl font-black ${latestTrend.individual >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.individual >= 0 ? '+' : ''}{formatNumber(latestTrend.individual)}
-                  </div>
-                </div>
-                <div className="bg-[#1a1f2e] border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Globe className="w-5 h-5 text-emerald-400" />
-                    <span className="text-sm font-bold text-slate-400">외국인 순매수</span>
-                  </div>
-                  <div className={`text-xl font-black ${latestTrend.foreign >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.foreign >= 0 ? '+' : ''}{formatNumber(latestTrend.foreign)}
+                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.individual >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {latestTrend.individual >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.individual / 100000000).toFixed(0)}억` : formatNumber(latestTrend.individual)}
                   </div>
                 </div>
-                <div className="bg-[#1a1f2e] border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center gap-3 mb-2">
-                    <Building2 className="w-5 h-5 text-violet-400" />
-                    <span className="text-sm font-bold text-slate-400">기관 순매수</span>
+                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
+                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
+                    <Globe className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-emerald-400`} />
+                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '외국인' : '외국인 순매수'}</span>
                   </div>
-                  <div className={`text-xl font-black ${latestTrend.institution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.institution >= 0 ? '+' : ''}{formatNumber(latestTrend.institution)}
+                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.foreign >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {latestTrend.foreign >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.foreign / 100000000).toFixed(0)}억` : formatNumber(latestTrend.foreign)}
+                  </div>
+                </div>
+                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
+                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
+                    <Building2 className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-violet-400`} />
+                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '기관' : '기관 순매수'}</span>
+                  </div>
+                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.institution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                    {latestTrend.institution >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.institution / 100000000).toFixed(0)}억` : formatNumber(latestTrend.institution)}
                   </div>
                 </div>
               </>

@@ -13,6 +13,7 @@ RUN npm ci
 COPY *.tsx *.ts *.css *.html ./
 COPY components/ ./components/
 COPY services/ ./services/
+COPY hooks/ ./hooks/
 COPY public/ ./public/
 COPY vite.config.ts tsconfig.json ./
 
