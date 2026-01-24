@@ -771,6 +771,10 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   // 매수 종목 정보 상태
   const [boughtStocks, setBoughtStocks] = useState<Record<string, BoughtStockInfo>>(loadBoughtStocks);
   
+  // 투자 모드 상태 (실전/모의)
+  const [tradingMode, setTradingMode] = useState<'mock' | 'real'>('mock');
+  const [isSwitchingMode, setIsSwitchingMode] = useState(false);
+  
   // Refs for visibility tracking
   const stockRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -790,6 +794,53 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       }
     } catch (err) {
       console.error('Failed to fetch scheduler status:', err);
+    }
+  };
+
+  // 투자 모드 조회
+  const fetchTradingMode = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/kis/trading-mode`);
+      if (response.ok) {
+        const data = await response.json();
+        setTradingMode(data.mode || 'mock');
+      }
+    } catch (err) {
+      console.error('Failed to fetch trading mode:', err);
+    }
+  };
+
+  // 투자 모드 전환
+  const switchTradingMode = async (newMode: 'mock' | 'real') => {
+    if (newMode === tradingMode) return;
+    
+    const confirmMsg = newMode === 'real' 
+      ? '⚠️ 실전투자 모드로 전환합니다.\n\n실제 계좌에서 주문이 체결됩니다.\n정말 전환하시겠습니까?'
+      : '모의투자 모드로 전환합니다.\n전환하시겠습니까?';
+    
+    if (!window.confirm(confirmMsg)) return;
+    
+    setIsSwitchingMode(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/kis/trading-mode`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: newMode })
+      });
+      
+      const data = await response.json();
+      if (data.success) {
+        setTradingMode(newMode);
+        setTotalAsset(0); // 자산 초기화 (다시 조회 필요)
+        alert(data.message || `${newMode === 'real' ? '실전투자' : '모의투자'} 모드로 전환되었습니다.`);
+      } else {
+        alert(`전환 실패: ${data.error}`);
+      }
+    } catch (err) {
+      console.error('Failed to switch trading mode:', err);
+      alert('투자 모드 전환 중 오류가 발생했습니다.');
+    } finally {
+      setIsSwitchingMode(false);
     }
   };
 
@@ -891,7 +942,8 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
     setIsLoading(true);
     Promise.all([
       fetchRecommendations('filter2', false),
-      fetchSchedulerStatus()
+      fetchSchedulerStatus(),
+      fetchTradingMode()
     ]).finally(() => setIsLoading(false));
   }, [modelName]);
 
@@ -1675,6 +1727,56 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
 
       {/* 계좌 현황 패널 */}
       <AccountPanel onTotalAssetChange={setTotalAsset} />
+
+      {/* 투자 모드 전환 */}
+      <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-4 mb-4">
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${tradingMode === 'real' ? 'bg-rose-500/20' : 'bg-emerald-500/20'}`}>
+              <span className={`w-3 h-3 rounded-full ${tradingMode === 'real' ? 'bg-rose-500 animate-pulse' : 'bg-emerald-500'}`} />
+            </div>
+            <div>
+              <h3 className={`font-bold ${tradingMode === 'real' ? 'text-rose-400' : 'text-emerald-400'}`}>
+                {tradingMode === 'real' ? '🔴 실전투자' : '🟢 모의투자'}
+              </h3>
+              <p className="text-xs text-slate-500">
+                {tradingMode === 'real' ? '실제 계좌에서 주문이 체결됩니다' : '모의 계좌로 안전하게 연습합니다'}
+              </p>
+            </div>
+          </div>
+          <div className="flex gap-2">
+            <button
+              onClick={() => switchTradingMode('mock')}
+              disabled={isSwitchingMode || tradingMode === 'mock'}
+              className={`px-4 py-2 text-sm font-bold rounded-xl transition-all ${
+                tradingMode === 'mock' 
+                  ? 'bg-emerald-500 text-white' 
+                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+              }`}
+            >
+              모의
+            </button>
+            <button
+              onClick={() => switchTradingMode('real')}
+              disabled={isSwitchingMode || tradingMode === 'real'}
+              className={`px-4 py-2 text-sm font-bold rounded-xl transition-all ${
+                tradingMode === 'real' 
+                  ? 'bg-rose-500 text-white' 
+                  : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+              }`}
+            >
+              실전
+            </button>
+          </div>
+        </div>
+        {tradingMode === 'real' && (
+          <div className="mt-3 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl">
+            <p className="text-xs text-rose-400 font-medium">
+              ⚠️ 실전투자 모드입니다. 모든 주문이 실제 계좌에서 체결됩니다.
+            </p>
+          </div>
+        )}
+      </div>
 
       {/* 매수/매도 비율 설정 패널 */}
       <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-8 overflow-hidden">

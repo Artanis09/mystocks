@@ -1463,6 +1463,18 @@ class AutoTradingEngine:
     
     def get_status(self) -> dict:
         """현재 상태 조회"""
+        # 자산 정보 갱신 (캐시: 1분 이내면 스킵)
+        import time
+        now = time.time()
+        if not hasattr(self, '_last_balance_check') or now - self._last_balance_check > 60:
+            try:
+                balance = self._get_account_balance()
+                if 'error' not in balance:
+                    self.state.total_asset = balance.get('total_eval', 0) + balance.get('deposit', 0)
+                    self.state.available_cash = balance.get('available', 0)
+                    self._last_balance_check = now
+            except:
+                pass
         return self.state.to_dict()
     
     def manual_buy(self, code: str, quantity: int) -> dict:

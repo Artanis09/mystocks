@@ -4210,11 +4210,37 @@ def api_auto_trading_build_universe():
     """유니버스 구축"""
     try:
         engine = get_auto_trading_engine()
-        count = engine.build_universe()
+        universe = engine.build_universe()
+        
+        # 상태에 저장
+        engine.state.universe = universe
+        
+        # 포지션 초기화
+        for stock in universe:
+            if stock.code not in engine.state.positions:
+                from auto_trading_strategy1 import Position, PositionState
+                engine.state.positions[stock.code] = Position(
+                    code=stock.code,
+                    name=stock.name,
+                    state=PositionState.WATCHING,
+                    prev_close=stock.prev_close
+                )
+        
+        engine._save_state()
+        
         return jsonify({
             "success": True,
             "message": "유니버스 구축 완료",
-            "count": count
+            "count": len(universe),
+            "universe": [
+                {
+                    "code": s.code,
+                    "name": s.name,
+                    "prev_close": s.prev_close,
+                    "change_rate": s.change_rate,
+                    "market_cap": s.market_cap
+                } for s in universe
+            ]
         })
     except Exception as e:
         print(f"유니버스 구축 오류: {e}")

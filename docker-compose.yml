@@ -19,6 +19,7 @@ services:
       - ./index.css:/app/index.css
       - ./types.ts:/app/types.ts
       - ./components:/app/components
+      - ./hooks:/app/hooks
       - ./services:/app/services
       - ./public:/app/public
     depends_on:
@@ -49,6 +50,7 @@ services:
       - ./update_stock_prices.py:/app/update_stock_prices.py
       - ./crawl.py:/app/crawl.py
       - ./debug_kis.py:/app/debug_kis.py
+      - ./auto_trading_strategy1.py:/app/auto_trading_strategy1.py
       - ./ml:/app/ml
       - ./scripts:/app/scripts
       # Persist data directory
