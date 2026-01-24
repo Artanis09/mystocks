@@ -4064,6 +4064,257 @@ def api_kis_calculate_sell():
         return jsonify({"error": str(e)}), 500
 
 
+
+# =============================
+# 자동매매 전략 API
+# =============================
+from auto_trading_strategy1 import get_auto_trading_engine, StrategyConfig, set_auto_trading_mode, get_auto_trading_mode, is_trading_day
+
+@app.route('/api/auto-trading/mode', methods=['GET'])
+def api_auto_trading_mode_get():
+    """자동매매 모드 조회"""
+    try:
+        mode_info = get_auto_trading_mode()
+        return jsonify({"success": True, **mode_info})
+    except Exception as e:
+        print(f"자동매매 모드 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/mode', methods=['POST'])
+def api_auto_trading_mode_set():
+    """자동매매 모드 전환"""
+    try:
+        data = request.get_json() or {}
+        mode = data.get('mode', 'mock')
+        result = set_auto_trading_mode(mode)
+        return jsonify(result)
+    except Exception as e:
+        print(f"자동매매 모드 전환 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/is-trading-day', methods=['GET'])
+def api_auto_trading_is_trading_day():
+    """오늘이 거래일인지 확인"""
+    try:
+        from datetime import date
+        today = date.today()
+        is_trading = is_trading_day(today)
+        return jsonify({
+            "success": True,
+            "date": today.strftime('%Y-%m-%d'),
+            "is_trading_day": is_trading,
+            "weekday": today.strftime('%A')
+        })
+    except Exception as e:
+        print(f"거래일 확인 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/status', methods=['GET'])
+def api_auto_trading_status():
+    """자동매매 상태 조회"""
+    try:
+        engine = get_auto_trading_engine()
+        status = engine.get_status()
+        mode_info = get_auto_trading_mode()
+        return jsonify({"success": True, **status, **mode_info})
+    except Exception as e:
+        print(f"자동매매 상태 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/start', methods=['POST'])
+def api_auto_trading_start():
+    """자동매매 시작"""
+    try:
+        engine = get_auto_trading_engine()
+        result = engine.start()
+        return jsonify(result)
+    except Exception as e:
+        print(f"자동매매 시작 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/stop', methods=['POST'])
+def api_auto_trading_stop():
+    """자동매매 중지"""
+    try:
+        engine = get_auto_trading_engine()
+        result = engine.stop()
+        return jsonify(result)
+    except Exception as e:
+        print(f"자동매매 중지 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/manual-buy', methods=['POST'])
+def api_auto_trading_manual_buy():
+    """수동 매수"""
+    try:
+        data = request.get_json() or {}
+        code = str(data.get('code', '')).zfill(6)
+        quantity = int(data.get('quantity', 0))
+        
+        if not code or quantity <= 0:
+            return jsonify({"success": False, "error": "종목코드와 수량이 필요합니다."}), 400
+        
+        engine = get_auto_trading_engine()
+        result = engine.manual_buy(code, quantity)
+        
+        if 'error' in result:
+            return jsonify({"success": False, **result})
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        print(f"수동 매수 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/manual-sell', methods=['POST'])
+def api_auto_trading_manual_sell():
+    """수동 매도"""
+    try:
+        data = request.get_json() or {}
+        code = str(data.get('code', '')).zfill(6)
+        quantity = int(data.get('quantity', 0))
+        
+        if not code:
+            return jsonify({"success": False, "error": "종목코드가 필요합니다."}), 400
+        
+        engine = get_auto_trading_engine()
+        result = engine.manual_sell(code, quantity)
+        
+        if 'error' in result:
+            return jsonify({"success": False, **result})
+        return jsonify({"success": True, **result})
+    except Exception as e:
+        print(f"수동 매도 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/refresh-positions', methods=['POST'])
+def api_auto_trading_refresh_positions():
+    """포지션 동기화"""
+    try:
+        engine = get_auto_trading_engine()
+        engine.refresh_positions()
+        return jsonify({"success": True, "message": "포지션이 동기화되었습니다."})
+    except Exception as e:
+        print(f"포지션 동기화 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/build-universe', methods=['POST'])
+def api_auto_trading_build_universe():
+    """유니버스 구축"""
+    try:
+        engine = get_auto_trading_engine()
+        count = engine.build_universe()
+        return jsonify({
+            "success": True,
+            "message": "유니버스 구축 완료",
+            "count": count
+        })
+    except Exception as e:
+        print(f"유니버스 구축 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/trade-history', methods=['GET'])
+def api_auto_trading_trade_history():
+    """거래 내역 조회"""
+    try:
+        days = int(request.args.get('days', 7))
+        engine = get_auto_trading_engine()
+        history = engine.get_trade_history(days)
+        return jsonify({
+            "success": True,
+            "history": history
+        })
+    except Exception as e:
+        print(f"거래 내역 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/config', methods=['GET'])
+def api_auto_trading_config():
+    """전략 설정 조회"""
+    try:
+        engine = get_auto_trading_engine()
+        config = engine.config
+        return jsonify({
+            "success": True,
+            "config": {
+                "upper_limit_rate": config.UPPER_LIMIT_RATE,
+                "min_market_cap": config.MIN_MARKET_CAP,
+                "gap_threshold": config.GAP_THRESHOLD,
+                "gap_confirm_count": config.GAP_CONFIRM_COUNT,
+                "entry_start_time": config.ENTRY_START_TIME,
+                "entry_end_time": config.ENTRY_END_TIME,
+                "take_profit_rate": config.TAKE_PROFIT_RATE,
+                "stop_loss_rate": config.STOP_LOSS_RATE,
+                "eod_sell_start": config.EOD_SELL_START,
+                "eod_sell_end": config.EOD_SELL_END,
+                "max_daily_loss_rate": config.MAX_DAILY_LOSS_RATE,
+                "max_positions": config.MAX_POSITIONS
+            }
+        })
+    except Exception as e:
+        print(f"전략 설정 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/config', methods=['POST'])
+def api_auto_trading_update_config():
+    """전략 설정 변경"""
+    try:
+        data = request.get_json() or {}
+        engine = get_auto_trading_engine()
+        
+        if 'max_positions' in data:
+            engine.config.MAX_POSITIONS = int(data['max_positions'])
+        if 'take_profit_rate' in data:
+            engine.config.TAKE_PROFIT_RATE = float(data['take_profit_rate'])
+        if 'stop_loss_rate' in data:
+            engine.config.STOP_LOSS_RATE = float(data['stop_loss_rate'])
+        if 'gap_threshold' in data:
+            engine.config.GAP_THRESHOLD = float(data['gap_threshold'])
+        if 'min_market_cap' in data:
+            engine.config.MIN_MARKET_CAP = float(data['min_market_cap'])
+            
+        return jsonify({
+            "success": True,
+            "message": "설정이 업데이트되었습니다.",
+            "config": {
+                "max_positions": engine.config.MAX_POSITIONS,
+                "take_profit_rate": engine.config.TAKE_PROFIT_RATE,
+                "stop_loss_rate": engine.config.STOP_LOSS_RATE,
+                "gap_threshold": engine.config.GAP_THRESHOLD,
+                "min_market_cap": engine.config.MIN_MARKET_CAP
+            }
+        })
+    except Exception as e:
+        print(f"전략 설정 변경 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/logs', methods=['GET'])
+def api_auto_trading_logs():
+    """자동매매 로그 조회"""
+    try:
+        limit = int(request.args.get('limit', 100))
+        engine = get_auto_trading_engine()
+        logs = engine.state.logs[-limit:]
+        return jsonify({
+            "success": True,
+            "logs": logs
+        })
+    except Exception as e:
+        print(f"로그 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 # Serve frontend index.html for SPA routing
 @app.route('/')
 def serve_index():

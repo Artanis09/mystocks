@@ -5,7 +5,8 @@ import {
   Briefcase, 
   BookOpen,
   ChevronRight,
-  Sparkles
+  Sparkles,
+  Bot
 } from 'lucide-react';
 import { PageType } from '../types';
 
@@ -20,6 +21,12 @@ const menuItems: { id: PageType; label: string; icon: React.ReactNode; descripti
     label: 'AI추천', 
     icon: <Sparkles className="w-5 h-5" />,
     description: 'Filter2 기반 예측'
+  },
+  { 
+    id: 'autotrading', 
+    label: '자동매매', 
+    icon: <Bot className="w-5 h-5" />,
+    description: '전략 기반 자동 거래'
   },
   { 
     id: 'dashboard', 

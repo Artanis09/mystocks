@@ -14,5 +14,3 @@ pyarrow
 schedule
 pykrx
 finance-datareader
-openai
-google-generativeai

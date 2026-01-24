@@ -157,4 +157,4 @@ export interface RecommendedStock {
 }
 
 // Navigation
-export type PageType = 'dashboard' | 'portfolio' | 'journal' | 'recommendations';
+export type PageType = 'dashboard' | 'portfolio' | 'journal' | 'recommendations' | 'autotrading';

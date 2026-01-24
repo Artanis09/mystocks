@@ -6,12 +6,13 @@ import { MobileNav } from './components/MobileNav';
 import { Dashboard } from './components/Dashboard';
 import { JournalPage } from './components/JournalPage';
 import { Recommendations } from './components/Recommendations';
+import { AutoTradingPage } from './components/AutoTradingPage';
+import { useResponsive } from './hooks/useResponsive';
 import { StockCard } from './components/StockCard';
 import { StockDetail } from './components/StockDetail';
 import { AddStockModal } from './components/AddStockModal';
 import { GroupReturnsPanel } from './components/GroupReturnsPanel';
 import { Button } from './components/Button';
-import { useResponsive } from './hooks/useResponsive';
 import { 
   Search, 
   PlusCircle, 
@@ -35,6 +36,7 @@ interface GroupReturnSummary {
 }
 
 const App: React.FC = () => {
+  const { isMobile } = useResponsive();
   const [currentPage, setCurrentPage] = useState<PageType>('recommendations');
   const [groups, setGroups] = useState<StockGroup[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
@@ -45,9 +47,6 @@ const App: React.FC = () => {
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [groupReturns, setGroupReturns] = useState<{ [key: string]: GroupReturnSummary }>({});
   const [selectedRecStock, setSelectedRecStock] = useState<StockData | null>(null);
-
-  // 반응형 디바이스 정보
-  const { isMobile, isTablet } = useResponsive();
 
   // 그룹별 수익률 로드
   const loadGroupReturns = async (groupIds: string[]) => {
@@ -487,14 +486,16 @@ const App: React.FC = () => {
           );
         }
         return <Recommendations onStockClick={handleRecStockClick} />;
+      case 'autotrading':
+        return <AutoTradingPage />;
       default:
         return <Dashboard />;
     }
   };
 
   return (
-    <div className="min-h-screen flex flex-col md:flex-row bg-[#0f121d] text-slate-200 selection:bg-point-cyan/30">
-      {/* 모바일 네비게이션 */}
+    <div className="min-h-screen flex bg-[#0f121d] text-slate-200 selection:bg-point-cyan/30">
+      {/* Mobile Navigation */}
       {isMobile && (
         <MobileNav 
           currentPage={currentPage} 
@@ -506,7 +507,7 @@ const App: React.FC = () => {
         />
       )}
 
-      {/* 데스크톱/태블릿 사이드바 */}
+      {/* Desktop Sidebar */}
       {!isMobile && (
         <Sidebar 
           currentPage={currentPage} 
@@ -519,8 +520,8 @@ const App: React.FC = () => {
       )}
 
       {/* Main Content */}
-      <main className={`flex-1 overflow-auto ${isMobile ? 'pt-16 pb-4 px-3' : 'p-8'}`}>
-        <div className={`mx-auto ${isMobile ? 'max-w-full' : 'max-w-7xl'}`}>
+      <main className={`flex-1 overflow-auto ${isMobile ? 'pt-16 px-4 pb-4' : 'p-8'}`}>
+        <div className="max-w-7xl mx-auto">
           {renderMainContent()}
         </div>
       </main>

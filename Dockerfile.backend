@@ -15,7 +15,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy Python application files
-COPY update_stock_prices.py crawl.py debug_kis.py ./
+COPY update_stock_prices.py crawl.py debug_kis.py auto_trading_strategy1.py ./
 COPY config.ini ./
 COPY ml/ ./ml/
 COPY scripts/ ./scripts/
