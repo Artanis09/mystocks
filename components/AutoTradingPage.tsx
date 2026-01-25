@@ -7,6 +7,7 @@ import {
   TrendingUp, 
   TrendingDown,
   AlertCircle,
+  AlertTriangle,
   CheckCircle2,
   Clock,
   Target,
@@ -140,21 +141,24 @@ const formatTime = (isoString: string) => {
 
 // 상태 뱃지 컴포넌트
 const StateBadge: React.FC<{ state: string }> = ({ state }) => {
-  const stateConfig: Record<string, { bg: string; text: string; label: string }> = {
-    IDLE: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '대기' },
-    WATCHING: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '감시중' },
-    ENTRY_PENDING: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: '진입대기' },
-    ENTERED: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', label: '보유중' },
-    EXIT_PENDING: { bg: 'bg-violet-500/20', text: 'text-violet-400', label: '청산대기' },
-    CLOSED: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '청산완료' },
-    SKIPPED: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '건너뜀' },
-    ERROR: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '오류' }
+  const stateConfig: Record<string, { bg: string; text: string; label: string; description: string }> = {
+    IDLE: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '대기', description: '초기 상태' },
+    WATCHING: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '감시중', description: '갭상승 감시 중' },
+    ENTRY_PENDING: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: '진입대기', description: '매수 주문 체결 대기' },
+    ENTERED: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', label: '보유중', description: '포지션 진입 완료' },
+    EXIT_PENDING: { bg: 'bg-violet-500/20', text: 'text-violet-400', label: '청산대기', description: '매도 주문 체결 대기' },
+    CLOSED: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '청산완료', description: '청산 완료' },
+    SKIPPED: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '건너뜀', description: '진입 조건 미달로 건너뜀' },
+    ERROR: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '오류', description: '오류 발생' }
   };
 
   const config = stateConfig[state] || stateConfig.IDLE;
 
   return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${config.bg} ${config.text}`}>
+    <span 
+      className={`px-2 py-0.5 rounded-full text-xs font-bold ${config.bg} ${config.text}`}
+      title={config.description}
+    >
       {config.label}
     </span>
   );
@@ -483,9 +487,14 @@ export const AutoTradingPage: React.FC = () => {
     );
   }
 
-  const activePositions = status ? Object.values(status.positions).filter(p => p.state === 'ENTERED') : [];
-  const watchingPositions = status ? Object.values(status.positions).filter(p => p.state === 'WATCHING') : [];
-  const pendingPositions = status ? Object.values(status.positions).filter(p => p.state.includes('PENDING')) : [];
+  // 상태별 포지션 분류
+  const allPositions = status ? Object.values(status.positions) : [];
+  const activePositions = allPositions.filter(p => p.state === 'ENTERED');
+  const watchingPositions = allPositions.filter(p => p.state === 'WATCHING');
+  const pendingPositions = allPositions.filter(p => p.state.includes('PENDING'));
+  const closedPositions = allPositions.filter(p => p.state === 'CLOSED');
+  const skippedPositions = allPositions.filter(p => p.state === 'SKIPPED');
+  const errorPositions = allPositions.filter(p => p.state === 'ERROR');
 
   return (
     <div className="p-4 md:p-8 max-w-7xl mx-auto">
@@ -877,36 +886,105 @@ export const AutoTradingPage: React.FC = () => {
         )}
       </div>
 
-      {/* 감시 종목 (유니버스) */}
+      {/* 전체 종목 상태 */}
       <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-6 overflow-hidden">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+        <div className="p-4 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
           <h3 className="text-white font-bold flex items-center gap-2">
             <Eye className="w-5 h-5 text-amber-400" />
-            감시 종목 ({watchingPositions.length})
+            전체 종목 상태 ({allPositions.length})
           </h3>
+          {/* 상태별 요약 */}
+          <div className="flex flex-wrap gap-2 text-xs">
+            {watchingPositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-amber-500/20 text-amber-400">
+                감시중 {watchingPositions.length}
+              </span>
+            )}
+            {pendingPositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-blue-500/20 text-blue-400">
+                주문대기 {pendingPositions.length}
+              </span>
+            )}
+            {activePositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-emerald-500/20 text-emerald-400">
+                보유중 {activePositions.length}
+              </span>
+            )}
+            {closedPositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-slate-500/20 text-slate-400">
+                청산 {closedPositions.length}
+              </span>
+            )}
+            {skippedPositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-rose-500/20 text-rose-400">
+                건너뜀 {skippedPositions.length}
+              </span>
+            )}
+            {errorPositions.length > 0 && (
+              <span className="px-2 py-1 rounded-full bg-rose-500/20 text-rose-400 animate-pulse">
+                오류 {errorPositions.length}
+              </span>
+            )}
+          </div>
         </div>
+
+        {/* 휴장일 경고 */}
+        {isTradingDay === false && (
+          <div className="p-4 bg-amber-500/10 border-b border-amber-500/30">
+            <div className="flex items-center gap-2 text-amber-400 font-bold">
+              <AlertTriangle className="w-5 h-5" />
+              오늘은 휴장일입니다. 매매 주문이 불가능합니다.
+            </div>
+          </div>
+        )}
         
-        {watchingPositions.length > 0 ? (
+        {allPositions.length > 0 ? (
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="text-slate-500 border-b border-slate-800 bg-slate-800/30">
                   <th className="text-left py-3 px-4">종목</th>
                   <th className="text-left py-3 px-4">상태</th>
-                  <th className="text-right py-3 px-4">전일 종가</th>
+                  <th className="text-right py-3 px-4">전일종가</th>
                   <th className="text-right py-3 px-4">현재가</th>
-                  <th className="text-right py-3 px-4">갭 확인</th>
+                  <th className="text-right py-3 px-4">수량</th>
+                  <th className="text-right py-3 px-4">갭/손익</th>
+                  <th className="text-left py-3 px-4">상세정보</th>
                   <th className="text-center py-3 px-4">액션</th>
                 </tr>
               </thead>
               <tbody>
-                {watchingPositions.map((pos) => {
+                {allPositions.map((pos) => {
                   const gapRate = pos.prev_close > 0 && pos.current_price > 0
                     ? ((pos.current_price - pos.prev_close) / pos.prev_close * 100)
                     : 0;
                   
+                  // 상태별 상세 정보 텍스트
+                  const getStatusDetail = () => {
+                    switch (pos.state) {
+                      case 'WATCHING':
+                        return `갭 확인: ${pos.gap_confirms}/${config?.gap_confirm_count || 2}`;
+                      case 'ENTRY_PENDING':
+                        return pos.order_id ? `주문번호: ${pos.order_id}` : '매수 주문 접수됨';
+                      case 'ENTERED':
+                        return pos.entry_time ? `진입: ${formatTime(pos.entry_time)}` : '보유 중';
+                      case 'EXIT_PENDING':
+                        return pos.order_id ? `청산주문: ${pos.order_id}` : '매도 주문 접수됨';
+                      case 'CLOSED':
+                        return pos.exit_reason || '청산 완료';
+                      case 'SKIPPED':
+                        return pos.exit_reason || '조건 미달';
+                      case 'ERROR':
+                        return pos.error_message || '알 수 없는 오류';
+                      default:
+                        return '-';
+                    }
+                  };
+                  
                   return (
-                    <tr key={pos.code} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                    <tr key={pos.code} className={`border-b border-slate-800/50 hover:bg-slate-800/30 ${
+                      pos.state === 'ERROR' ? 'bg-rose-500/5' : ''
+                    }`}>
                       <td className="py-3 px-4">
                         <div className="font-bold text-white">{pos.name || pos.code}</div>
                         <div className="text-xs text-slate-500">{pos.code}</div>
@@ -915,27 +993,62 @@ export const AutoTradingPage: React.FC = () => {
                       <td className="py-3 px-4 text-right text-slate-400">{formatPrice(pos.prev_close)}원</td>
                       <td className="py-3 px-4 text-right text-white">
                         {pos.current_price > 0 ? `${formatPrice(pos.current_price)}원` : '-'}
-                        {gapRate !== 0 && (
-                          <div className={`text-xs ${gapRate >= 2 ? 'text-emerald-400' : 'text-slate-500'}`}>
-                            갭 {formatPercent(gapRate)}
-                          </div>
+                      </td>
+                      <td className="py-3 px-4 text-right">
+                        {pos.quantity > 0 ? (
+                          <span className="text-white font-bold">{pos.quantity}주</span>
+                        ) : pos.pending_quantity > 0 ? (
+                          <span className="text-blue-400">{pos.pending_quantity}주 (대기)</span>
+                        ) : (
+                          <span className="text-slate-500">-</span>
                         )}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        <span className={`font-bold ${pos.gap_confirms > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>
-                          {pos.gap_confirms}/{config?.gap_confirm_count || 2}
-                        </span>
+                        {pos.state === 'WATCHING' ? (
+                          <span className={`font-bold ${gapRate >= 2 ? 'text-emerald-400' : 'text-slate-500'}`}>
+                            갭 {formatPercent(gapRate)}
+                          </span>
+                        ) : pos.state === 'ENTERED' && pos.unrealized_pnl !== 0 ? (
+                          <span className={`font-bold ${pos.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {formatPercent(pos.unrealized_pnl_rate)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500">-</span>
+                        )}
+                      </td>
+                      <td className="py-3 px-4">
+                        <div className={`text-xs ${pos.state === 'ERROR' ? 'text-rose-400' : 'text-slate-400'}`}>
+                          {getStatusDetail()}
+                        </div>
+                        {pos.retry_count > 0 && (
+                          <div className="text-xs text-amber-400">재시도: {pos.retry_count}회</div>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-center">
-                        <button
-                          onClick={() => {
-                            setManualCode(pos.code);
-                            setManualQuantity('1');
-                          }}
-                          className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-3 py-1 rounded-lg text-xs font-bold transition-all"
-                        >
-                          수동매수
-                        </button>
+                        {(pos.state === 'WATCHING' || pos.state === 'IDLE') && (
+                          <button
+                            onClick={() => {
+                              setManualCode(pos.code);
+                              setManualQuantity('1');
+                            }}
+                            disabled={isTradingDay === false}
+                            className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            수동매수
+                          </button>
+                        )}
+                        {pos.state === 'ENTERED' && (
+                          <button
+                            onClick={() => handleManualSell(pos.code, 0)}
+                            disabled={isTradingDay === false}
+                            className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                          >
+                            청산
+                          </button>
+                        )}
+                        {pos.state === 'ERROR' && (
+                          <span className="text-xs text-rose-400">확인필요</span>
+                        )}
                       </td>
                     </tr>
                   );
@@ -945,7 +1058,7 @@ export const AutoTradingPage: React.FC = () => {
           </div>
         ) : (
           <div className="p-8 text-center text-slate-500">
-            감시 중인 종목이 없습니다. "유니버스 구축" 버튼을 눌러 종목을 추가하세요.
+            종목이 없습니다. "유니버스 구축" 버튼을 눌러 종목을 추가하세요.
           </div>
         )}
       </div>

@@ -276,8 +276,6 @@ class Recommendation(db.Model):
     probability = db.Column(db.Float, default=0)
     expected_return = db.Column(db.Float, default=0)
     market_cap = db.Column(db.Float, default=0)
-    ai_analysis = db.Column(db.Text, nullable=True)  # AI 분석 결과
-    ai_service = db.Column(db.String(20), nullable=True)  # 분석에 사용된 AI 서비스 (openai/gemini)
     created_at = db.Column(db.String(50), nullable=False)
 
 # 포트폴리오 일간 수익률 히스토리 (캐싱용)
@@ -348,12 +346,6 @@ def init_db():
             if 'model_name' not in cols:
                 cur.execute("ALTER TABLE recommendation ADD COLUMN model_name TEXT DEFAULT 'model1'")
                 conn.commit()
-            if 'ai_analysis' not in cols:
-                cur.execute("ALTER TABLE recommendation ADD COLUMN ai_analysis TEXT")
-                conn.commit()
-            if 'ai_service' not in cols:
-                cur.execute("ALTER TABLE recommendation ADD COLUMN ai_service TEXT")
-                conn.commit()
         except Exception as e:
             print(f"[WARN] DB migration failed: {e}")
         finally:
@@ -366,27 +358,8 @@ def init_db():
 # 한국투자증권 API 설정
 APP_KEY = os.getenv("KIS_APP_KEY")
 APP_SECRET = os.getenv("KIS_APP_SECRET")
-KIS_MOCK = os.getenv("KIS_MOCK", "false").lower() == "true"  # 모의투자 여부 (기본: 실전투자)
 ACCESS_TOKEN = None
 TOKEN_FILE = "kis_token.json"
-
-# TR ID 매핑 (모의투자 vs 실전투자)
-def get_tr_id(base_tr_id: str) -> str:
-    """모의투자/실전투자 환경에 맞는 TR ID 반환
-    
-    모의투자 TR ID는 'V'로 시작, 실전투자는 'T'로 시작
-    """
-    if KIS_MOCK:
-        # 모의투자: T -> V로 변경
-        if base_tr_id.startswith("T"):
-            return "V" + base_tr_id[1:]
-    return base_tr_id
-
-def get_kis_base_url() -> str:
-    """모의투자/실전투자 환경에 맞는 기본 URL 반환"""
-    if KIS_MOCK:
-        return "https://openapivts.koreainvestment.com:29443"
-    return "https://openapi.koreainvestment.com:9443"
 
 
 def save_token(token_data):
@@ -427,9 +400,8 @@ def get_kis_access_token():
                 print("파일에서 토큰 로드 성공")
                 return ACCESS_TOKEN
     
-    # 새 토큰 발급 (모의투자/실전투자 URL 구분)
-    base_url = get_kis_base_url()
-    url = f"{base_url}/oauth2/tokenP"
+    # 새 토큰 발급
+    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {
         "grant_type": "client_credentials",
@@ -437,7 +409,7 @@ def get_kis_access_token():
         "appsecret": APP_SECRET
     }
     
-    print(f"KIS 토큰 발급 요청... (모의투자: {KIS_MOCK})")
+    print("KIS 토큰 발급 요청...")
     
     try:
         response = requests.post(url, headers=headers, json=body, timeout=10)
@@ -1147,9 +1119,7 @@ def get_recommendations():
                 'expected_return': rec.expected_return,
                 'market_cap': rec.market_cap,
                 'return_rate': profit_rate,
-                'price_source': price_source,  # 프론트엔드에서 실시간 여부 표시용
-                'ai_analysis': getattr(rec, 'ai_analysis', None),
-                'ai_service': getattr(rec, 'ai_service', None),
+                'price_source': price_source  # 프론트엔드에서 실시간 여부 표시용
             })
         
         response_data = {
@@ -1279,10 +1249,6 @@ def update_recommendations():
             for _, row in top_candidates.iterrows():
                 code = str(row['code']).zfill(6)
                 name = name_map.get(code, code)
-                
-                # AI 분석 수행 (OpenAI GPT 사용)
-                print(f"[Manual Predict] AI Analyzing {name} ({code})...")
-                ai_analysis = get_stock_analysis_from_openai(name, code)
 
                 rec = Recommendation(
                     date=base_date_str,
@@ -1294,8 +1260,6 @@ def update_recommendations():
                     probability=float(row['positive_proba']),
                     expected_return=float(row['expected_return']),
                     market_cap=float(row['market_cap']),
-                    ai_analysis=ai_analysis,
-                    ai_service='openai',
                     created_at=now_ts,
                 )
                 db.session.add(rec)
@@ -2806,109 +2770,6 @@ def test_notification_api():
     return jsonify({"message": "Test notification sent"}), 200
 
 
-# =============================
-# AI 종목 분석 API (OpenAI / Gemini)
-# =============================
-
-STOCK_ANALYSIS_PROMPT = """당신은 한국 주식 시장 전문 애널리스트입니다.
-종목명: {stock_name} (종목코드: {stock_code})
-
-각 종목의 가장 최신뉴스들을 검색하고 분석하여, 상장폐지나 거래정지 등 크리티컬한 위험 요소와 관련한 뉴스가 있다면 "⚠️ 매매금지" 메시지를 주세요.
-최신뉴스와 오늘의 트렌드 관점에서 다음날까지의 단기보유 관점에서 참고 또는 주의할점, 매매를 한다면 손익비 관점에서의 진입, 탈출 등에 관한 조언을 3줄 이하로 요약해주세요.
-
-응답 형식:
-- 위험요소 발견 시: "⚠️ 매매금지: [이유]" 로 시작
-- 정상: 단기 매매 관점과 조언 요약
-
-반드시 한국어로 답변하고, 최대 3줄로 간결하게 작성하세요."""
-
-
-def get_stock_analysis_from_openai(stock_name: str, stock_code: str) -> str:
-    """OpenAI API를 통해 종목에 대한 매매 관점 분석 요약"""
-    import openai
-    
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if not openai_api_key:
-        return "OpenAI API 키가 설정되지 않았습니다."
-    
-    try:
-        client = openai.OpenAI(api_key=openai_api_key)
-        prompt = STOCK_ANALYSIS_PROMPT.format(stock_name=stock_name, stock_code=stock_code)
-        
-        response = client.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "당신은 한국 주식 시장 전문 애널리스트입니다. 간결하고 핵심적인 분석을 제공합니다."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=400,
-            temperature=0.7
-        )
-        
-        return response.choices[0].message.content.strip()
-    
-    except Exception as e:
-        print(f"[OpenAI Error] {stock_name}: {e}")
-        return f"분석 실패: {str(e)[:50]}"
-
-
-def get_stock_analysis_from_gemini(stock_name: str, stock_code: str) -> str:
-    """Google Gemini API를 통해 종목에 대한 매매 관점 분석 요약"""
-    import google.generativeai as genai
-    
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-    if not gemini_api_key:
-        return "Gemini API 키가 설정되지 않았습니다."
-    
-    try:
-        genai.configure(api_key=gemini_api_key)
-        model = genai.GenerativeModel('gemini-2.0-flash')
-        prompt = STOCK_ANALYSIS_PROMPT.format(stock_name=stock_name, stock_code=stock_code)
-        
-        response = model.generate_content(prompt)
-        return response.text.strip()
-    
-    except Exception as e:
-        print(f"[Gemini Error] {stock_name}: {e}")
-        return f"분석 실패: {str(e)[:50]}"
-
-
-@app.route('/api/stock-analysis', methods=['POST'])
-def get_stock_analysis():
-    """종목 분석 API - OpenAI/Gemini를 통한 매매 관점 요약"""
-    try:
-        data = request.get_json()
-        stocks = data.get('stocks', [])  # [{"code": "005930", "name": "삼성전자"}, ...]
-        ai_service = data.get('ai_service', 'openai')  # 'openai' or 'gemini'
-        
-        if not stocks:
-            return jsonify({"error": "stocks 리스트가 비어있습니다."}), 400
-        
-        if len(stocks) > 10:
-            return jsonify({"error": "한 번에 최대 10개 종목만 분석 가능합니다."}), 400
-        
-        # AI 서비스 선택
-        analysis_func = get_stock_analysis_from_gemini if ai_service == 'gemini' else get_stock_analysis_from_openai
-        print(f"[Stock Analysis] Using {ai_service.upper()} for {len(stocks)} stocks")
-        
-        results = {}
-        for stock in stocks:
-            code = stock.get('code', '')
-            name = stock.get('name', '')
-            if code and name:
-                analysis = analysis_func(name, code)
-                results[code] = {
-                    "name": name,
-                    "analysis": analysis
-                }
-        
-        return jsonify({"analyses": results, "ai_service": ai_service})
-    
-    except Exception as e:
-        print(f"[Stock Analysis Error] {e}")
-        return jsonify({"error": str(e)}), 500
-
-
 def run_crawl_eod(max_retries: int = 3):
     """EOD 모드로 크롤링 실행 (유니버스 캐시 생성) - 네트워크 오류 시 재시도"""
     global _scheduler_state
@@ -2959,8 +2820,6 @@ def run_crawl_eod(max_retries: int = 3):
                     _scheduler_state["last_crawl_mode"] = "eod (auto)"
                     _scheduler_state["last_crawl_date_range"] = target_date
                     _scheduler_state["last_crawl_duration"] = duration_seconds
-                with _scheduler_lock:
-                    _scheduler_state["crawling_status"] = None
                 return True
             else:
                 error_msg = result.stderr[:500] if result.stderr else "Unknown error"
@@ -3187,11 +3046,6 @@ def run_inference_for_models():
                         code = str(row['code']).zfill(6)
                         name = name_map.get(code, code)
                         model_stocks.append(name)
-                        
-                        # 스케줄러 자동 분석 (OpenAI GPT 기본 사용)
-                        print(f"[Scheduler] AI Analyzing {name} ({code})...")
-                        ai_analysis = get_stock_analysis_from_openai(name, code)
-                        
                         rec = Recommendation(
                             date=base_date_str,
                             filter_tag='filter2',
@@ -3202,8 +3056,6 @@ def run_inference_for_models():
                             probability=float(row['positive_proba']),
                             expected_return=float(row['expected_return']),
                             market_cap=float(row['market_cap']),
-                            ai_analysis=ai_analysis,
-                            ai_service='openai',
                             created_at=now_ts,
                         )
                         db.session.add(rec)
@@ -3289,63 +3141,9 @@ def start_scheduler_thread():
 # 스케줄러 상태 및 크롤링 상태 API
 # =============================
 
-def get_data_range_info() -> dict:
-    """수집된 데이터의 범위 및 상태 정보 반환"""
-    try:
-        if not os.path.isdir(KRX_BARS_DIR):
-            return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": []}
-        
-        dates = []
-        errors = []
-        valid_days = 0
-        
-        for name in os.listdir(KRX_BARS_DIR):
-            d = _parse_partition_date(name)
-            if d:
-                dates.append(d)
-                # parquet 파일 존재 여부 확인
-                part_path = os.path.join(KRX_BARS_DIR, name, "part-0000.parquet")
-                if os.path.exists(part_path):
-                    valid_days += 1
-                else:
-                    errors.append(f"{d.strftime('%Y-%m-%d')}: 파일 없음")
-        
-        if not dates:
-            return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": errors}
-        
-        # 최근 10일 내 누락된 날짜 확인 (주말 제외)
-        min_date = min(dates)
-        max_date = max(dates)
-        dates_set = set(dates)
-        
-        missing_days = []
-        check_date = max_date
-        check_count = 0
-        while check_count < 10 and check_date >= min_date:
-            if check_date.weekday() < 5:  # 평일만
-                if check_date not in dates_set:
-                    missing_days.append(check_date.strftime('%Y-%m-%d'))
-                check_count += 1
-            check_date -= timedelta(days=1)
-        
-        return {
-            "start_date": min_date.strftime('%Y-%m-%d'),
-            "end_date": max_date.strftime('%Y-%m-%d'),
-            "total_days": len(dates),
-            "valid_days": valid_days,
-            "missing_days": missing_days[:5],  # 최근 5개만
-            "errors": errors[:5],  # 최근 5개만
-        }
-    except Exception as e:
-        return {"start_date": None, "end_date": None, "total_days": 0, "valid_days": 0, "missing_days": [], "errors": [str(e)]}
-
-
 @app.route('/api/scheduler/status', methods=['GET'])
 def get_scheduler_status():
     """스케줄러 및 크롤링 상태 조회"""
-    # 데이터 범위 계산
-    data_range = get_data_range_info()
-    
     with _scheduler_lock:
         return jsonify({
             "eod_done_today": _scheduler_state["eod_done_today"],
@@ -3360,13 +3158,6 @@ def get_scheduler_status():
             "last_crawl_mode": _scheduler_state["last_crawl_mode"],
             "last_crawl_date_range": _scheduler_state["last_crawl_date_range"],
             "last_crawl_duration": _scheduler_state["last_crawl_duration"],
-            # 데이터 범위 정보
-            "data_start_date": data_range["start_date"],
-            "data_end_date": data_range["end_date"],
-            "data_total_days": data_range["total_days"],
-            "data_valid_days": data_range["valid_days"],
-            "data_missing_days": data_range["missing_days"],
-            "data_errors": data_range["errors"],
         })
 
 
@@ -3574,108 +3365,19 @@ KIS_ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")  # 예: "12345678-01"
 # 자산 히스토리 (간단한 메모리 저장, 실제 서비스에서는 DB 사용)
 _asset_history = []
 
-# 실전/모의투자 전환용 키 저장 (환경변수에서 로드)
-# ⚠️ 보안 주의: API 키는 반드시 환경변수(.env)에 설정하세요. 코드에 직접 입력하지 마세요!
-KIS_KEYS = {
-    "mock": {
-        "app_key": os.getenv("KIS_APP_KEY"),
-        "app_secret": os.getenv("KIS_APP_SECRET"),
-        "account_no": os.getenv("KIS_ACCOUNT_NO", ""),
-    },
-    "real": {
-        "app_key": os.getenv("KIS_REAL_APP_KEY", ""),
-        "app_secret": os.getenv("KIS_REAL_APP_SECRET", ""),
-        "account_no": os.getenv("KIS_REAL_ACCOUNT_NO", ""),
-    }
-}
-
-@app.route('/api/kis/trading-mode', methods=['GET'])
-def api_kis_trading_mode():
-    """현재 투자 모드 조회 (실전/모의)"""
-    global KIS_MOCK
-    return jsonify({
-        "success": True,
-        "mode": "mock" if KIS_MOCK else "real",
-        "label": "모의투자" if KIS_MOCK else "실전투자",
-        "account_no": KIS_ACCOUNT_NO,
-        "url": get_kis_base_url()
-    })
-
-@app.route('/api/kis/trading-mode', methods=['POST'])
-def api_kis_switch_trading_mode():
-    """투자 모드 전환 (실전/모의)
-    
-    Body: {"mode": "mock" 또는 "real"}
-    """
-    global KIS_MOCK, APP_KEY, APP_SECRET, KIS_ACCOUNT_NO, ACCESS_TOKEN
-    
-    try:
-        data = request.get_json()
-        mode = data.get("mode", "mock")
-        
-        if mode not in ["mock", "real"]:
-            return jsonify({"success": False, "error": "mode는 'mock' 또는 'real'이어야 합니다."}), 400
-        
-        # 전환 수행
-        new_keys = KIS_KEYS.get(mode, KIS_KEYS["mock"])
-        
-        # 키 유효성 검사
-        if not new_keys["app_key"] or not new_keys["app_secret"]:
-            return jsonify({
-                "success": False,
-                "error": f"{mode} 모드에 필요한 API 키가 설정되지 않았습니다.",
-                "hint": f"환경변수에 {'KIS_REAL_APP_KEY/KIS_REAL_APP_SECRET' if mode == 'real' else 'KIS_APP_KEY/KIS_APP_SECRET'}을 설정하세요."
-            }), 400
-        
-        # 글로벌 변수 업데이트
-        KIS_MOCK = (mode == "mock")
-        APP_KEY = new_keys["app_key"]
-        APP_SECRET = new_keys["app_secret"]
-        KIS_ACCOUNT_NO = new_keys["account_no"]
-        
-        # 토큰 초기화 (새로운 키로 재발급 필요)
-        ACCESS_TOKEN = None
-        
-        # 토큰 파일 삭제 (새로 발급받도록)
-        try:
-            if os.path.exists(TOKEN_FILE):
-                os.remove(TOKEN_FILE)
-        except Exception:
-            pass
-        
-        print(f"[KIS] 투자모드 전환: {mode} (계좌: {KIS_ACCOUNT_NO})")
-        
-        return jsonify({
-            "success": True,
-            "mode": mode,
-            "label": "모의투자" if mode == "mock" else "실전투자",
-            "account_no": KIS_ACCOUNT_NO,
-            "url": get_kis_base_url(),
-            "message": f"{'모의투자' if mode == 'mock' else '실전투자'} 모드로 전환되었습니다."
-        })
-        
-    except Exception as e:
-        print(f"투자모드 전환 오류: {e}")
-        return jsonify({"success": False, "error": str(e)}), 500
-
-
 def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET", body=None):
     """KIS 트레이딩 API 호출 (계좌 조회, 주문 등)"""
     token = get_kis_access_token()
     if not token:
         return {"error": "토큰 발급 실패"}
     
-    # 모의투자/실전투자에 맞는 TR ID와 URL 사용
-    actual_tr_id = get_tr_id(tr_id)
-    base_url = get_kis_base_url()
-    
-    url = f"{base_url}{endpoint}"
+    url = f"https://openapi.koreainvestment.com:9443{endpoint}"
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
         "appkey": APP_KEY,
         "appsecret": APP_SECRET,
-        "tr_id": actual_tr_id,
+        "tr_id": tr_id,
         "custtype": "P"
     }
     
@@ -3685,9 +3387,8 @@ def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET",
         else:
             response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        print(f"KIS Trading API [{actual_tr_id}] 응답: {response.status_code}")
+        print(f"KIS Trading API [{tr_id}] 응답: {response.status_code}")
         if response.status_code != 200:
-            print(f"KIS Trading API 상세 오류: {response.text}")
             return {"error": f"API 오류: {response.status_code}", "detail": response.text}
         
         return response.json()
@@ -3784,7 +3485,7 @@ def api_kis_account_balance():
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M")
         _asset_history.append({
             "time": now_str,
-            "totalAsset": account_summary["totalEvalAmount"] + account_summary["depositBalance"]
+            "totalAsset": account_summary["totalEvalAmount"]  # 총평가금액 (예수금 + 주식평가)
         })
         # 최근 100개만 유지
         if len(_asset_history) > 100:
@@ -4064,7 +3765,6 @@ def api_kis_calculate_sell():
         return jsonify({"error": str(e)}), 500
 
 
-
 # =============================
 # 자동매매 전략 API
 # =============================
@@ -4119,7 +3819,10 @@ def api_auto_trading_status():
         engine = get_auto_trading_engine()
         status = engine.get_status()
         mode_info = get_auto_trading_mode()
-        return jsonify({"success": True, **status, **mode_info})
+        # 오늘 거래일 여부 추가 (date 객체로 전달)
+        today = datetime.now().date()
+        trading_day = is_trading_day(today)
+        return jsonify({"success": True, "isTradingDay": trading_day, **status, **mode_info})
     except Exception as e:
         print(f"자동매매 상태 조회 오류: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -4177,7 +3880,7 @@ def api_auto_trading_manual_sell():
     try:
         data = request.get_json() or {}
         code = str(data.get('code', '')).zfill(6)
-        quantity = int(data.get('quantity', 0))
+        quantity = int(data.get('quantity', 0))  # 0이면 전량
         
         if not code:
             return jsonify({"success": False, "error": "종목코드가 필요합니다."}), 400
@@ -4195,11 +3898,14 @@ def api_auto_trading_manual_sell():
 
 @app.route('/api/auto-trading/refresh-positions', methods=['POST'])
 def api_auto_trading_refresh_positions():
-    """포지션 동기화"""
+    """포지션 동기화 (계좌 잔고 기준)"""
     try:
         engine = get_auto_trading_engine()
-        engine.refresh_positions()
-        return jsonify({"success": True, "message": "포지션이 동기화되었습니다."})
+        result = engine.refresh_positions()
+        
+        if 'error' in result:
+            return jsonify({"success": False, **result})
+        return jsonify({"success": True, **result})
     except Exception as e:
         print(f"포지션 동기화 오류: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
@@ -4207,7 +3913,7 @@ def api_auto_trading_refresh_positions():
 
 @app.route('/api/auto-trading/build-universe', methods=['POST'])
 def api_auto_trading_build_universe():
-    """유니버스 구축"""
+    """유니버스 수동 구축"""
     try:
         engine = get_auto_trading_engine()
         universe = engine.build_universe()
@@ -4230,7 +3936,6 @@ def api_auto_trading_build_universe():
         
         return jsonify({
             "success": True,
-            "message": "유니버스 구축 완료",
             "count": len(universe),
             "universe": [
                 {
@@ -4244,6 +3949,8 @@ def api_auto_trading_build_universe():
         })
     except Exception as e:
         print(f"유니버스 구축 오류: {e}")
+        import traceback
+        traceback.print_exc()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
@@ -4254,6 +3961,7 @@ def api_auto_trading_trade_history():
         days = int(request.args.get('days', 7))
         engine = get_auto_trading_engine()
         history = engine.get_trade_history(days)
+        
         return jsonify({
             "success": True,
             "history": history
@@ -4298,6 +4006,7 @@ def api_auto_trading_update_config():
         data = request.get_json() or {}
         engine = get_auto_trading_engine()
         
+        # 설정 가능한 파라미터들 업데이트
         if 'max_positions' in data:
             engine.config.MAX_POSITIONS = int(data['max_positions'])
         if 'take_profit_rate' in data:
@@ -4308,6 +4017,10 @@ def api_auto_trading_update_config():
             engine.config.GAP_THRESHOLD = float(data['gap_threshold'])
         if 'min_market_cap' in data:
             engine.config.MIN_MARKET_CAP = float(data['min_market_cap'])
+        if 'entry_start_time' in data:
+            engine.config.ENTRY_START_TIME = str(data['entry_start_time'])
+        if 'entry_end_time' in data:
+            engine.config.ENTRY_END_TIME = str(data['entry_end_time'])
             
         return jsonify({
             "success": True,
@@ -4331,7 +4044,9 @@ def api_auto_trading_logs():
     try:
         limit = int(request.args.get('limit', 100))
         engine = get_auto_trading_engine()
+        
         logs = engine.state.logs[-limit:]
+        
         return jsonify({
             "success": True,
             "logs": logs

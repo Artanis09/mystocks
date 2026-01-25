@@ -450,8 +450,8 @@ const AccountPanel: React.FC<AccountPanelProps> = ({ onTotalAssetChange }) => {
         setHoldings(data.holdings || []);
         setSummary(data.summary || null);
         setAssetHistory(data.assetHistory || []);
-        // 총자산 변경 콜백
-        const totalAsset = (data.summary?.totalEvalAmount || 0) + (data.summary?.depositBalance || 0);
+        // 총자산 변경 콜백 (totalEvalAmount = 주식평가 + 예수금)
+        const totalAsset = data.summary?.totalEvalAmount || 0;
         onTotalAssetChange(totalAsset);
       } else {
         setError(data.error || '계좌 조회 실패');
@@ -469,7 +469,7 @@ const AccountPanel: React.FC<AccountPanelProps> = ({ onTotalAssetChange }) => {
     fetchAccountBalance();
   }, []);
 
-  const totalAsset = summary ? summary.totalEvalAmount + summary.depositBalance : 0;
+  const totalAsset = summary ? summary.totalEvalAmount : 0;  // totalEvalAmount = 주식평가 + 예수금
   const profitRate = summary?.totalProfitRate || 0;
   const isProfit = profitRate >= 0;
 

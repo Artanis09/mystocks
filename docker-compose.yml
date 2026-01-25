@@ -43,6 +43,9 @@ services:
       - KIS_APP_KEY=${KIS_APP_KEY}
       - KIS_APP_SECRET=${KIS_APP_SECRET}
       - KIS_ACCOUNT_NO=${KIS_ACCOUNT_NO}
+      - KIS_REAL_APP_KEY=${KIS_REAL_APP_KEY}
+      - KIS_REAL_APP_SECRET=${KIS_REAL_APP_SECRET}
+      - KIS_REAL_ACCOUNT_NO=${KIS_REAL_ACCOUNT_NO}
       - DB_PATH=/app/db
       - TZ=Asia/Seoul
     volumes:
@@ -58,7 +61,6 @@ services:
       # Persist database in a directory
       - db-data:/app/db
       # Config files
-      - ./config.ini:/app/config.ini
       - ./.env:/app/.env
     networks:
       - mystocks-network

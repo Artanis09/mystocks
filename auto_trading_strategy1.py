@@ -135,6 +135,11 @@ class StrategyConfig:
     ORDER_TIMEOUT_SEC = 5        # 주문 타임아웃 (초)
     ORDER_RETRY_COUNT = 3        # 주문 재시도 횟수
     ORDER_RETRY_DELAY = 0.5      # 재시도 딜레이 (초)
+    
+    # 진입 실패 판정
+    ENTRY_MAX_RISE_RATE = 8.0    # 진입 포기 급등 기준 (전일종가 대비 %) - 너무 올랐으면 진입 포기
+    ENTRY_PENDING_TIMEOUT = 60   # 미체결 대기 타임아웃 (초) - 초과 시 주문 취소
+    ENTRY_ORDER_CANCEL_AFTER_WINDOW = True  # 진입 윈도우 종료 후 미체결 취소
 
 
 # =============================
@@ -197,6 +202,8 @@ class Position:
     # 주문 정보
     order_id: str = ""          # 최근 주문번호
     pending_quantity: int = 0   # 미체결 수량
+    order_time: str = ""        # 주문 시간 (미체결 타임아웃 체크용)
+    market_cap: float = 0.0     # 시가총액 (억원)
     
     # 이벤트 정보
     gap_confirms: int = 0       # 갭 확인 횟수
@@ -222,6 +229,8 @@ class Position:
             'unrealized_pnl_rate': self.unrealized_pnl_rate,
             'order_id': self.order_id,
             'pending_quantity': self.pending_quantity,
+            'order_time': self.order_time,
+            'market_cap': self.market_cap,
             'gap_confirms': self.gap_confirms,
             'entry_time': self.entry_time,
             'exit_time': self.exit_time,
@@ -243,6 +252,8 @@ class Position:
         pos.unrealized_pnl_rate = data.get('unrealized_pnl_rate', 0.0)
         pos.order_id = data.get('order_id', '')
         pos.pending_quantity = data.get('pending_quantity', 0)
+        pos.order_time = data.get('order_time', '')
+        pos.market_cap = data.get('market_cap', 0.0)
         pos.gap_confirms = data.get('gap_confirms', 0)
         pos.entry_time = data.get('entry_time', '')
         pos.exit_time = data.get('exit_time', '')
@@ -518,8 +529,9 @@ class AutoTradingEngine:
             if self._access_token and time.time() < self._token_expired - 600:
                 return self._access_token
             
-            # 파일에서 토큰 로드
-            token_file = Path("kis_token.json")
+            # 파일에서 토큰 로드 (모의/실전 분리)
+            token_suffix = "_mock" if self.is_mock else "_real"
+            token_file = Path(f"kis_token{token_suffix}.json")
             if token_file.exists():
                 with open(token_file, 'r') as f:
                     token_data = json.load(f)
@@ -541,7 +553,7 @@ class AutoTradingEngine:
                 self._access_token = data['access_token']
                 self._token_expired = time.time() + data.get('expires_in', 86400)
                 
-                # 토큰 저장
+                # 토큰 저장 (모의/실전 분리)
                 with open(token_file, 'w') as f:
                     json.dump({
                         'access_token': self._access_token,
@@ -615,6 +627,29 @@ class AutoTradingEngine:
                 'bid_price': int(output.get('bidp1', 0) or 0)
             }
         return {}
+    
+    def _get_market_cap(self, code: str) -> float:
+        """시가총액 조회 (억원 단위)
+        
+        KIS API: 주식기본조회 (FHKST01010100)의 hts_avls(시가총액) 필드 사용
+        """
+        try:
+            result = self._call_kis_api(
+                "/uapi/domestic-stock/v1/quotations/inquire-price",
+                params={"fid_cond_mrkt_div_code": "J", "fid_input_iscd": code.zfill(6)},
+                tr_id="FHKST01010100"
+            )
+            
+            output = result.get('output', {})
+            if output:
+                # hts_avls: 시가총액 (억원 단위)
+                market_cap_str = output.get('hts_avls', '0')
+                market_cap = float(market_cap_str.replace(',', '') if market_cap_str else 0)
+                return market_cap
+            return 0.0
+        except Exception as e:
+            self._log_event('WARNING', 'MARKET_CAP_ERROR', f'시가총액 조회 실패: {e}', code=code)
+            return 0.0
     
     def _get_account_balance(self) -> dict:
         """계좌 잔고 조회"""
@@ -768,6 +803,72 @@ class AutoTradingEngine:
         
         return {'error': '주문 조회 실패'}
     
+    def _cancel_order(self, order_no: str, code: str, quantity: int) -> dict:
+        """미체결 주문 취소
+        
+        Args:
+            order_no: 원주문번호
+            code: 종목코드
+            quantity: 취소할 수량
+        """
+        if not self.account_no or not order_no:
+            return {'error': '계좌번호 또는 주문번호 없음'}
+        
+        parts = self.account_no.split('-')
+        
+        body = {
+            "CANO": parts[0],
+            "ACNT_PRDT_CD": parts[1],
+            "KRX_FWDG_ORD_ORGNO": "",  # 거래소 주문조직번호 (공백)
+            "ORGN_ODNO": order_no,      # 원주문번호
+            "ORD_DVSN": "00",           # 지정가
+            "RVSE_CNCL_DVSN_CD": "02",  # 취소
+            "ORD_QTY": str(quantity),
+            "ORD_UNPR": "0",
+            "QTY_ALL_ORD_YN": "Y"       # 전량 취소
+        }
+        
+        # TR_ID: 주문취소 (모의: VTTC0803U, 실전: TTTC0803U)
+        tr_id = self._get_tr_id("TTTC0803U")
+        
+        result = self._call_kis_api(
+            "/uapi/domestic-stock/v1/trading/order-rvsecncl",
+            tr_id=tr_id,
+            method="POST",
+            body=body
+        )
+        
+        if 'error' in result:
+            return result
+        
+        output = result.get('output', {})
+        return {
+            'success': True,
+            'order_no': output.get('ODNO', ''),
+            'message': '주문 취소 완료'
+        }
+    
+    def _check_pending_timeout(self, position: Position) -> bool:
+        """미체결 주문 타임아웃 체크
+        
+        Returns:
+            True: 타임아웃 발생 (취소 필요)
+            False: 정상 대기 중
+        """
+        if not position.order_time:
+            return False
+        
+        try:
+            order_time = datetime.fromisoformat(position.order_time)
+            elapsed = (datetime.now() - order_time).total_seconds()
+            
+            if elapsed >= self.config.ENTRY_PENDING_TIMEOUT:
+                return True
+        except:
+            pass
+        
+        return False
+    
     # =============================
     # 유니버스 구축
     # =============================
@@ -794,10 +895,17 @@ class AutoTradingEngine:
             return get_prev_trading_day(today)
     
     def build_universe(self) -> List[UniverseStock]:
-        """전일 상한가 종목 유니버스 구축"""
+        """전일 상한가 종목 유니버스 구축
+        
+        1. 상한가 조건(29.5%+) 필터링
+        2. KIS API로 시가총액 조회
+        3. 시총 500억 이상 필터링
+        4. 시총 높은 순으로 정렬 (진입 우선순위)
+        """
         self._log_event('INFO', 'UNIVERSE_BUILD', '유니버스 구축 시작')
         
-        universe = []
+        candidates = []  # 1차 후보 (상한가 조건만)
+        universe = []    # 최종 유니버스 (시총 필터 후)
         
         try:
             # 유니버스 대상 날짜 계산
@@ -806,7 +914,7 @@ class AutoTradingEngine:
             
             self._log_event('INFO', 'UNIVERSE_DATE', f'유니버스 기준일: {target_date_str}')
             
-            # 1차: 로컬 parquet 데이터에서 조회 (우선)
+            # 1차: 로컬 parquet 데이터에서 상한가 종목 조회
             bars_dir = Path("data/krx/bars") / f"date={target_date_str}"
             if bars_dir.exists():
                 self._log_event('INFO', 'UNIVERSE_LOCAL', f'로컬 데이터 사용: {target_date_str}')
@@ -825,83 +933,129 @@ class AutoTradingEngine:
                             close = row.get('close', 0)
                             high = row.get('high', 0)
                             
-                            # 시가총액 조회 (별도 처리 필요하면 추가)
-                            # 현재는 시총 필터 없이 상한가 종목만 추가
-                            universe.append(UniverseStock(
-                                code=code,
-                                name=name,
-                                prev_close=close,
-                                prev_high=high,
-                                change_rate=change_rate,
-                                market_cap=0,  # 로컬 데이터에 시총 없음
-                                added_date=self.state.today
-                            ))
-                            
-                            self._log_event('INFO', 'UNIVERSE_ADD', 
-                                          f'{name} 유니버스 추가',
-                                          code=code,
-                                          data={'change_rate': round(change_rate, 2)})
+                            candidates.append({
+                                'code': code,
+                                'name': name,
+                                'prev_close': close,
+                                'prev_high': high,
+                                'change_rate': change_rate
+                            })
                     
-                    self._log_event('INFO', 'UNIVERSE_COMPLETE', 
-                                  f'유니버스 구축 완료: {len(universe)}개 종목')
-                    return universe
+                    self._log_event('INFO', 'UNIVERSE_CANDIDATES', 
+                                  f'상한가 종목 {len(candidates)}개 발견, 시총 조회 시작')
                     
                 except Exception as e:
                     self._log_event('WARNING', 'UNIVERSE_LOCAL_ERROR', f'로컬 데이터 로드 실패: {e}')
             
             # 2차: pykrx 폴백 (로컬 데이터 없을 경우)
-            self._log_event('INFO', 'UNIVERSE_PYKRX', 'pykrx에서 데이터 조회')
-            from pykrx import stock
-            
-            prev_date = target_date.strftime('%Y%m%d')
-            
-            # 전 종목 티커 조회
-            kospi_tickers = stock.get_market_ticker_list(prev_date, market="KOSPI")
-            kosdaq_tickers = stock.get_market_ticker_list(prev_date, market="KOSDAQ")
-            all_tickers = kospi_tickers + kosdaq_tickers
-            
-            for code in all_tickers:
+            if not candidates:
+                self._log_event('INFO', 'UNIVERSE_PYKRX', 'pykrx에서 데이터 조회')
                 try:
-                    # 개별 종목 OHLCV 조회
-                    ohlcv = stock.get_market_ohlcv_by_date(prev_date, prev_date, code)
-                    if ohlcv.empty:
-                        continue
+                    from pykrx import stock
                     
-                    row = ohlcv.iloc[0]
-                    change_rate = row.get('등락률', 0)
+                    prev_date = target_date.strftime('%Y%m%d')
                     
-                    # 상한가 조건
-                    if change_rate >= self.config.UPPER_LIMIT_RATE:
-                        name = stock.get_market_ticker_name(code)
-                        close = row.get('종가', 0)
-                        high = row.get('고가', 0)
-                        
-                        universe.append(UniverseStock(
-                            code=code,
-                            name=name,
-                            prev_close=close,
-                            prev_high=high,
-                            change_rate=change_rate,
-                            market_cap=0,
-                            added_date=self.state.today
-                        ))
-                        
-                        self._log_event('INFO', 'UNIVERSE_ADD', 
-                                      f'{name} 유니버스 추가',
-                                      code=code,
-                                      data={'change_rate': round(change_rate, 2)})
-                except Exception as e:
-                    continue
+                    # 전 종목 티커 조회
+                    kospi_tickers = stock.get_market_ticker_list(prev_date, market="KOSPI")
+                    kosdaq_tickers = stock.get_market_ticker_list(prev_date, market="KOSDAQ")
+                    all_tickers = kospi_tickers + kosdaq_tickers
+                    
+                    for code in all_tickers:
+                        try:
+                            ohlcv = stock.get_market_ohlcv_by_date(prev_date, prev_date, code)
+                            if ohlcv.empty:
+                                continue
+                            
+                            row = ohlcv.iloc[0]
+                            change_rate = row.get('등락률', 0)
+                            
+                            if change_rate >= self.config.UPPER_LIMIT_RATE:
+                                name = stock.get_market_ticker_name(code)
+                                close = row.get('종가', 0)
+                                high = row.get('고가', 0)
+                                
+                                candidates.append({
+                                    'code': code,
+                                    'name': name,
+                                    'prev_close': close,
+                                    'prev_high': high,
+                                    'change_rate': change_rate
+                                })
+                        except:
+                            continue
+                except ImportError:
+                    self._log_event('WARNING', 'UNIVERSE_FALLBACK', 'pykrx 미설치')
+            
+            # 3단계: KIS API로 시가총액 조회 및 필터링
+            for cand in candidates:
+                code = cand['code']
+                name = cand['name']
+                
+                # KIS API로 시총 조회
+                market_cap = self._get_market_cap(code)
+                time.sleep(0.1)  # API 호출 간격 (rate limit 방지)
+                
+                # 시총 필터: 500억 이상
+                if market_cap >= self.config.MIN_MARKET_CAP:
+                    universe.append(UniverseStock(
+                        code=code,
+                        name=name,
+                        prev_close=cand['prev_close'],
+                        prev_high=cand['prev_high'],
+                        change_rate=cand['change_rate'],
+                        market_cap=market_cap,
+                        added_date=self.state.today
+                    ))
+                    
+                    self._log_event('INFO', 'UNIVERSE_ADD', 
+                                  f'{name} 유니버스 추가 (시총 {market_cap:.0f}억)',
+                                  code=code,
+                                  data={'change_rate': round(cand['change_rate'], 2), 'market_cap': market_cap})
+                else:
+                    self._log_event('INFO', 'UNIVERSE_SKIP', 
+                                  f'{name} 시총 미달 ({market_cap:.0f}억 < {self.config.MIN_MARKET_CAP}억)',
+                                  code=code)
+            
+            # 4단계: 시총 높은 순으로 정렬 (진입 우선순위)
+            universe.sort(key=lambda x: x.market_cap, reverse=True)
             
             self._log_event('INFO', 'UNIVERSE_COMPLETE', 
-                          f'유니버스 구축 완료: {len(universe)}개 종목')
+                          f'유니버스 구축 완료: {len(universe)}개 종목 (시총순 정렬)')
             
-        except ImportError:
-            self._log_event('WARNING', 'UNIVERSE_FALLBACK', 'pykrx 미설치')
+            # DB에 유니버스 저장
+            self._save_universe_to_db(universe, target_date_str)
+            
         except Exception as e:
             self._log_event('ERROR', 'UNIVERSE_ERROR', f'유니버스 구축 실패: {e}')
         
         return universe
+    
+    def _save_universe_to_db(self, universe: List[UniverseStock], target_date: str):
+        """유니버스를 DB에 저장 (히스토리 관리)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            for stock in universe:
+                cursor.execute("""
+                    INSERT OR REPLACE INTO auto_trading_universe 
+                    (date, code, name, prev_close, change_rate, market_cap, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    target_date,
+                    stock.code,
+                    stock.name,
+                    stock.prev_close,
+                    stock.change_rate,
+                    stock.market_cap,
+                    datetime.now().isoformat()
+                ))
+            
+            conn.commit()
+            conn.close()
+            self._log_event('INFO', 'UNIVERSE_DB_SAVED', f'유니버스 DB 저장 완료: {len(universe)}개')
+        except Exception as e:
+            self._log_event('ERROR', 'UNIVERSE_DB_ERROR', f'유니버스 DB 저장 실패: {e}')
     
     def _build_universe_from_db(self) -> List[UniverseStock]:
         """DB에서 유니버스 구축 (폴백)"""
@@ -954,7 +1108,7 @@ class AutoTradingEngine:
     # =============================
     
     def check_entry_signal(self, position: Position) -> bool:
-        """진입 시그널 확인 (갭 ≥ +2%, 2회 확인)"""
+        """진입 시그널 확인 (갭 ≥ +2%, 2회 확인, 급등 시 포기)"""
         try:
             price_data = self._get_current_price(position.code)
             if not price_data:
@@ -972,6 +1126,17 @@ class AutoTradingEngine:
             
             # 현재가 업데이트
             position.current_price = current_price
+            
+            # 급등 체크: 현재가가 전일종가 대비 너무 올랐으면 진입 포기
+            current_rise_rate = (current_price - prev_close) / prev_close * 100
+            if current_rise_rate >= self.config.ENTRY_MAX_RISE_RATE:
+                self._log_event('WARNING', 'ENTRY_SKIP_SURGE', 
+                              f'급등으로 진입 포기 ({current_rise_rate:.1f}% > {self.config.ENTRY_MAX_RISE_RATE}%)',
+                              code=position.code,
+                              data={'current_rise_rate': current_rise_rate, 'current_price': current_price})
+                position.state = PositionState.SKIPPED
+                position.error_message = f'급등 진입 포기 ({current_rise_rate:.1f}%)'
+                return False
             
             # 갭 조건 확인
             if gap_rate >= self.config.GAP_THRESHOLD:
@@ -1107,6 +1272,7 @@ class AutoTradingEngine:
             
             position.order_id = result.get('order_no', '')
             position.pending_quantity = quantity
+            position.order_time = datetime.now().isoformat()  # 주문 시간 기록 (타임아웃 체크용)
             
             self._log_event('INFO', 'ENTRY_ORDER', f'매수 주문 접수',
                           code=position.code,
@@ -1372,15 +1538,53 @@ class AutoTradingEngine:
                     self.execute_entry(position)
             
             elif position.state == PositionState.ENTRY_PENDING:
-                # 체결 확인
-                self.confirm_order(position)
+                # 미체결 타임아웃 체크
+                if self._check_pending_timeout(position):
+                    # 타임아웃 시 주문 취소
+                    cancel_success = self._cancel_order(
+                        position.entry_order_no, 
+                        position.code, 
+                        position.quantity
+                    )
+                    if cancel_success:
+                        position.state = PositionState.SKIPPED
+                        position.error_message = f'진입 미체결 타임아웃 ({self.config.ENTRY_PENDING_TIMEOUT}초)'
+                        self._log_event('WARNING', 'ENTRY_TIMEOUT', 
+                                      f'{position.code}: 미체결 타임아웃으로 주문 취소')
+                    else:
+                        # 취소 실패 시 체결 확인 계속
+                        self.confirm_order(position)
+                else:
+                    # 체결 확인
+                    self.confirm_order(position)
         
         time.sleep(0.5)  # 빠르게 체크
     
     def _phase_monitoring(self):
         """장중 모니터링 (09:03~15:20)"""
+        # 진입 윈도우 종료 후 미체결 진입 주문 처리
+        if self.config.ENTRY_ORDER_CANCEL_AFTER_WINDOW:
+            for code, position in list(self.state.positions.items()):
+                if position.state == PositionState.ENTRY_PENDING:
+                    # 진입 윈도우가 끝났으므로 미체결 주문 취소
+                    cancel_success = self._cancel_order(
+                        position.entry_order_no, 
+                        position.code, 
+                        position.quantity
+                    )
+                    if cancel_success:
+                        position.state = PositionState.SKIPPED
+                        position.error_message = '진입 윈도우 종료, 미체결 취소'
+                        self._log_event('INFO', 'ENTRY_WINDOW_EXPIRED', 
+                                      f'{position.code}: 진입 윈도우 종료로 미체결 취소')
+                    else:
+                        # 취소 실패 - 부분 체결 가능성, 체결 확인 계속
+                        self.confirm_order(position)
+                        self._log_event('WARNING', 'CANCEL_FAILED', 
+                                      f'{position.code}: 미체결 취소 실패, 체결 확인 계속')
+        
         for code, position in self.state.positions.items():
-            # 미체결 주문 확인
+            # 미체결 주문 확인 (취소 실패한 경우)
             if position.state == PositionState.ENTRY_PENDING:
                 self.confirm_order(position)
             
@@ -1470,7 +1674,7 @@ class AutoTradingEngine:
             try:
                 balance = self._get_account_balance()
                 if 'error' not in balance:
-                    self.state.total_asset = balance.get('total_eval', 0) + balance.get('deposit', 0)
+                    self.state.total_asset = balance.get('total_eval', 0)  # 총평가금액 (예수금 포함)
                     self.state.available_cash = balance.get('available', 0)
                     self._last_balance_check = now
             except:
@@ -1549,7 +1753,7 @@ class AutoTradingEngine:
             holdings = balance.get('holdings', {})
             
             # 계좌 정보 업데이트
-            self.state.total_asset = balance.get('total_eval', 0) + balance.get('deposit', 0)
+            self.state.total_asset = balance.get('total_eval', 0)  # 총평가금액 (예수금 포함)
             self.state.available_cash = balance.get('available', 0)
             
             # 포지션 동기화
