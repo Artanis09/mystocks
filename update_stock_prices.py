@@ -3917,17 +3917,18 @@ def api_auto_trading_stop():
 
 @app.route('/api/auto-trading/manual-buy', methods=['POST'])
 def api_auto_trading_manual_buy():
-    """수동 매수"""
+    """수동 매수 (quantity=0 또는 미지정 시 1/N 비율로 자동 계산)"""
     try:
         data = request.get_json() or {}
         code = str(data.get('code', '')).zfill(6)
-        quantity = int(data.get('quantity', 0))
+        quantity = int(data.get('quantity', 0))  # 0이면 자동 계산
+        use_auto_quantity = data.get('auto_quantity', False) or quantity == 0
         
-        if not code or quantity <= 0:
-            return jsonify({"success": False, "error": "종목코드와 수량이 필요합니다."}), 400
+        if not code:
+            return jsonify({"success": False, "error": "종목코드가 필요합니다."}), 400
         
         engine = get_auto_trading_engine()
-        result = engine.manual_buy(code, quantity)
+        result = engine.manual_buy(code, quantity, auto_quantity=use_auto_quantity)
         
         if 'error' in result:
             return jsonify({"success": False, **result})

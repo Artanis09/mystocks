@@ -1747,9 +1747,35 @@ class AutoTradingEngine:
                 pass
         return self.state.to_dict()
     
-    def manual_buy(self, code: str, quantity: int) -> dict:
-        """수동 매수"""
+    def manual_buy(self, code: str, quantity: int, auto_quantity: bool = False) -> dict:
+        """수동 매수 (auto_quantity=True이면 1/N 비율로 자동 계산)"""
         try:
+            # 현재가 조회
+            price_data = self._get_current_price(code)
+            if not price_data:
+                return {'error': '현재가 조회 실패'}
+            
+            current_price = price_data.get('current_price', 0)
+            ask_price = price_data.get('ask_price', current_price)
+            
+            if current_price <= 0:
+                return {'error': '유효하지 않은 가격'}
+            
+            # 수량 계산 (auto_quantity=True이면 1/N 비율)
+            if auto_quantity or quantity <= 0:
+                # 계좌 정보 갱신
+                self._update_balance()
+                position_amount = self.state.total_asset / self.config.MAX_POSITIONS
+                order_price = ask_price + (self.config.ORDER_SLIPPAGE_TICKS * self._get_tick_size(current_price))
+                quantity = int(position_amount / order_price)
+                
+                if quantity <= 0:
+                    return {'error': f'매수 수량 부족 (투자금액: {position_amount:,.0f}원, 주문가: {order_price:,.0f}원)'}
+                
+                self._log_event('INFO', 'MANUAL_BUY_CALC', f'수동 매수 수량 자동 계산: 1/{self.config.MAX_POSITIONS}',
+                              code=code,
+                              data={'position_amount': position_amount, 'order_price': order_price, 'quantity': quantity})
+            
             result = self._place_order(code, quantity, 'buy', 0)
             
             if 'error' in result:
@@ -1757,7 +1783,6 @@ class AutoTradingEngine:
             
             # 포지션 생성/업데이트
             if code not in self.state.positions:
-                price_data = self._get_current_price(code)
                 self.state.positions[code] = Position(
                     code=code,
                     name='',  # 이름은 나중에 업데이트
@@ -1770,12 +1795,12 @@ class AutoTradingEngine:
             position.order_id = result.get('order_no', '')
             position.pending_quantity = quantity
             
-            self._log_event('INFO', 'MANUAL_BUY', f'수동 매수 주문',
+            self._log_event('INFO', 'MANUAL_BUY', f'수동 매수 주문 (auto={auto_quantity})',
                           code=code,
-                          data={'qty': quantity, 'order_no': result.get('order_no', '')})
+                          data={'qty': quantity, 'order_no': result.get('order_no', ''), 'auto_quantity': auto_quantity})
             
             self._save_state()
-            return result
+            return {**result, 'quantity': quantity}
         except Exception as e:
             return {'error': str(e)}
     

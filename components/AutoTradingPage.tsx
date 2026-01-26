@@ -229,6 +229,7 @@ export const AutoTradingPage: React.FC = () => {
   // 수동 주문
   const [manualCode, setManualCode] = useState('');
   const [manualQuantity, setManualQuantity] = useState('');
+  const [useAutoQuantity, setUseAutoQuantity] = useState(true);  // 기본값: 1/N 자동 계산
   const [isOrdering, setIsOrdering] = useState(false);
   
   // 설정 수정
@@ -495,21 +496,35 @@ export const AutoTradingPage: React.FC = () => {
 
   // 수동 매수
   const handleManualBuy = async () => {
-    if (!manualCode || !manualQuantity) {
-      alert('종목코드와 수량을 입력하세요');
+    if (!manualCode) {
+      alert('종목코드를 입력하세요');
       return;
     }
+    if (!useAutoQuantity && (!manualQuantity || parseInt(manualQuantity) <= 0)) {
+      alert('수량을 입력하세요');
+      return;
+    }
+    
+    const confirmMsg = useAutoQuantity 
+      ? `${manualCode} 종목을 1/${config?.max_positions || 5} 비율로 매수하시겠습니까?`
+      : `${manualCode} 종목을 ${manualQuantity}주 매수하시겠습니까?`;
+    if (!window.confirm(confirmMsg)) return;
     
     setIsOrdering(true);
     try {
       const response = await fetch(`${API_BASE_URL}/auto-trading/manual-buy`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code: manualCode, quantity: parseInt(manualQuantity) })
+        body: JSON.stringify({ 
+          code: manualCode, 
+          quantity: useAutoQuantity ? 0 : parseInt(manualQuantity),
+          auto_quantity: useAutoQuantity
+        })
       });
       const data = await response.json();
       if (data.success) {
-        alert(`매수 주문 완료: ${data.order_no}`);
+        const qtyMsg = data.quantity ? ` (${data.quantity}주)` : '';
+        alert(`매수 주문 완료: ${data.order_no}${qtyMsg}`);
         setManualCode('');
         setManualQuantity('');
         fetchStatus();
@@ -948,33 +963,56 @@ export const AutoTradingPage: React.FC = () => {
                     <th className="text-right py-2 px-2">수량</th>
                     <th className="text-right py-2 px-2">가격</th>
                     <th className="text-right py-2 px-2">손익</th>
-                    <th className="text-left py-2 px-2">사유</th>
+                    <th className="text-left py-2 px-2">청산 사유</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {tradeHistory.map((trade) => (
-                    <tr key={trade.id} className="border-b border-slate-800/50">
-                      <td className="py-2 px-2 text-slate-400">{trade.trade_date}</td>
-                      <td className="py-2 px-2 text-white">{trade.name}</td>
-                      <td className="py-2 px-2">
-                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                          trade.trade_type === 'buy' 
-                            ? 'bg-emerald-500/20 text-emerald-400' 
-                            : 'bg-rose-500/20 text-rose-400'
-                        }`}>
-                          {trade.trade_type === 'buy' ? '매수' : '매도'}
+                  {tradeHistory.map((trade) => {
+                    // 청산 사유 배지 스타일
+                    const getExitReasonBadge = (reason: string | null) => {
+                      if (!reason) return null;
+                      const reasonMap: { [key: string]: { label: string; className: string } } = {
+                        'TP': { label: '✅ 익절 (TP)', className: 'bg-emerald-500/20 text-emerald-400' },
+                        'TAKE_PROFIT': { label: '✅ 익절 (TP)', className: 'bg-emerald-500/20 text-emerald-400' },
+                        'SL': { label: '🛑 손절 (SL)', className: 'bg-rose-500/20 text-rose-400' },
+                        'STOP_LOSS': { label: '🛑 손절 (SL)', className: 'bg-rose-500/20 text-rose-400' },
+                        'EOD': { label: '🕐 장마감 청산', className: 'bg-amber-500/20 text-amber-400' },
+                        'EOD_CLOSE': { label: '🕐 장마감 청산', className: 'bg-amber-500/20 text-amber-400' },
+                        'MANUAL': { label: '👤 수동 청산', className: 'bg-blue-500/20 text-blue-400' },
+                        'AUTO': { label: '🤖 자동', className: 'bg-slate-500/20 text-slate-400' },
+                      };
+                      const config = reasonMap[reason.toUpperCase()] || { label: reason, className: 'bg-slate-500/20 text-slate-400' };
+                      return (
+                        <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${config.className}`}>
+                          {config.label}
                         </span>
-                      </td>
-                      <td className="py-2 px-2 text-right text-white">{trade.quantity}</td>
-                      <td className="py-2 px-2 text-right text-white">{formatPrice(trade.price)}</td>
-                      <td className={`py-2 px-2 text-right font-bold ${
-                        (trade.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
-                      }`}>
-                        {trade.pnl !== null ? `${formatPrice(trade.pnl)} (${formatPercent(trade.pnl_rate || 0)})` : '-'}
-                      </td>
-                      <td className="py-2 px-2 text-slate-400">{trade.exit_reason || '-'}</td>
-                    </tr>
-                  ))}
+                      );
+                    };
+                    
+                    return (
+                      <tr key={trade.id} className="border-b border-slate-800/50">
+                        <td className="py-2 px-2 text-slate-400">{trade.trade_date}</td>
+                        <td className="py-2 px-2 text-white">{trade.name}</td>
+                        <td className="py-2 px-2">
+                          <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                            trade.trade_type === 'buy' 
+                              ? 'bg-emerald-500/20 text-emerald-400' 
+                              : 'bg-rose-500/20 text-rose-400'
+                          }`}>
+                            {trade.trade_type === 'buy' ? '매수' : '매도'}
+                          </span>
+                        </td>
+                        <td className="py-2 px-2 text-right text-white">{trade.quantity}</td>
+                        <td className="py-2 px-2 text-right text-white">{formatPrice(trade.price)}</td>
+                        <td className={`py-2 px-2 text-right font-bold ${
+                          (trade.pnl || 0) >= 0 ? 'text-emerald-400' : 'text-rose-400'
+                        }`}>
+                          {trade.pnl !== null ? `${formatPrice(trade.pnl)} (${formatPercent(trade.pnl_rate || 0)})` : '-'}
+                        </td>
+                        <td className="py-2 px-2">{getExitReasonBadge(trade.exit_reason) || '-'}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1185,7 +1223,8 @@ export const AutoTradingPage: React.FC = () => {
                           <button
                             onClick={() => {
                               setManualCode(pos.code);
-                              setManualQuantity('1');
+                              setUseAutoQuantity(true);  // 자동 수량 활성화
+                              setManualQuantity('');
                             }}
                             disabled={isTradingDay === false}
                             className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
@@ -1236,16 +1275,45 @@ export const AutoTradingPage: React.FC = () => {
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
             />
           </div>
-          <div className="flex-1 min-w-[100px]">
-            <label className="text-xs text-slate-500 mb-1 block">수량</label>
-            <input
-              type="number"
-              value={manualQuantity}
-              onChange={(e) => setManualQuantity(e.target.value)}
-              placeholder="1"
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
-            />
+          
+          {/* 자동 수량 토글 */}
+          <div className="min-w-[140px]">
+            <label className="text-xs text-slate-500 mb-1 block">수량 계산</label>
+            <button
+              onClick={() => setUseAutoQuantity(!useAutoQuantity)}
+              className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-bold transition-all ${
+                useAutoQuantity
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-slate-800 text-slate-400 border border-slate-700'
+              }`}
+            >
+              {useAutoQuantity ? (
+                <>
+                  <ToggleRight className="w-5 h-5" />
+                  자동 (1/{config?.max_positions || 5})
+                </>
+              ) : (
+                <>
+                  <ToggleLeft className="w-5 h-5" />
+                  수동 입력
+                </>
+              )}
+            </button>
           </div>
+          
+          {!useAutoQuantity && (
+            <div className="flex-1 min-w-[100px]">
+              <label className="text-xs text-slate-500 mb-1 block">수량</label>
+              <input
+                type="number"
+                value={manualQuantity}
+                onChange={(e) => setManualQuantity(e.target.value)}
+                placeholder="1"
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
+              />
+            </div>
+          )}
+          
           <button
             onClick={handleManualBuy}
             disabled={isOrdering}
@@ -1255,6 +1323,14 @@ export const AutoTradingPage: React.FC = () => {
             매수
           </button>
         </div>
+        
+        {/* 자동 수량 설명 */}
+        {useAutoQuantity && status && (
+          <p className="mt-3 text-xs text-slate-500">
+            💡 총 자산 {formatPrice(status.total_asset)}원 ÷ {config?.max_positions || 5} = 
+            종목당 약 {formatPrice(Math.floor((status.total_asset || 0) / (config?.max_positions || 5)))}원 투자
+          </p>
+        )}
       </div>
 
       {/* 로그 패널 */}
