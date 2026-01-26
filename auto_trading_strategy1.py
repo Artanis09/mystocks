@@ -41,6 +41,36 @@ logger = logging.getLogger(__name__)
 
 
 # =============================
+# ntfy 알림 설정
+# =============================
+NTFY_TOPIC_URL = "https://ntfy.sh/wayne-akdlrjf0924-auto1"
+
+
+def send_ntfy_notification(title: str, message: str, priority: str = "default", tags: List[str] = None):
+    """ntfy.sh로 알림 전송"""
+    try:
+        headers = {
+            "Title": title,
+            "Priority": priority,
+        }
+        if tags:
+            headers["Tags"] = ",".join(tags)
+        
+        response = requests.post(
+            NTFY_TOPIC_URL,
+            data=message.encode('utf-8'),
+            headers=headers,
+            timeout=5
+        )
+        if response.status_code == 200:
+            logger.info(f"[NTFY] 알림 전송 성공: {title}")
+        else:
+            logger.warning(f"[NTFY] 알림 전송 실패: {response.status_code}")
+    except Exception as e:
+        logger.error(f"[NTFY] 알림 전송 오류: {e}")
+
+
+# =============================
 # 휴장일 체크 유틸리티
 # =============================
 def get_korean_holidays(year: int) -> set:
@@ -1346,6 +1376,14 @@ class AutoTradingEngine:
                         self._log_event('INFO', 'ENTRY_FILLED', f'매수 체결 완료',
                                       code=position.code,
                                       data={'qty': exec_qty, 'price': exec_price})
+                        
+                        # ntfy 알림: 매수 완료
+                        send_ntfy_notification(
+                            title="✅ 매수 체결 완료",
+                            message=f"[{position.name}] {exec_qty}주 @ {exec_price:,}원",
+                            priority="high",
+                            tags=["white_check_mark", "moneybag"]
+                        )
                         return True
                     else:
                         self._log_event('INFO', 'ENTRY_PARTIAL', f'부분 체결',
@@ -1379,6 +1417,21 @@ class AutoTradingEngine:
                                   code=position.code,
                                   data={'qty': exec_qty, 'price': exec_price, 
                                         'pnl': pnl, 'pnl_rate': pnl_rate})
+                    
+                    # ntfy 알림: 청산 완료 (TP/SL)
+                    emoji = "🎉" if pnl >= 0 else "😢"
+                    reason_text = {
+                        'TP': '익절',
+                        'SL': '손절', 
+                        'EOD': '장마감 청산',
+                        'MANUAL': '수동 청산'
+                    }.get(position.exit_reason, position.exit_reason)
+                    send_ntfy_notification(
+                        title=f"{emoji} 청산 완료 ({reason_text})",
+                        message=f"[{position.name}] {exec_qty}주 @ {exec_price:,}원\n손익: {pnl:+,.0f}원 ({pnl_rate:+.2f}%)",
+                        priority="high" if abs(pnl_rate) >= 5 else "default",
+                        tags=["chart_with_upwards_trend" if pnl >= 0 else "chart_with_downwards_trend", "money_with_wings"]
+                    )
                     return True
             
             return False
@@ -1526,6 +1579,19 @@ class AutoTradingEngine:
                         state=PositionState.WATCHING,
                         prev_close=stock.prev_close
                     )
+            
+            # ntfy 알림: PREPARING 단계 유니버스 구축
+            if self.state.universe:
+                stock_names = [s.name for s in self.state.universe[:10]]  # 최대 10개
+                stock_list = ", ".join(stock_names)
+                if len(self.state.universe) > 10:
+                    stock_list += f" 외 {len(self.state.universe) - 10}개"
+                send_ntfy_notification(
+                    title="🎯 유니버스 구축 완료",
+                    message=f"[{self.state.today}] 감시 종목 {len(self.state.universe)}개\n{stock_list}",
+                    priority="default",
+                    tags=["chart_with_upwards_trend", "stock"]
+                )
         
         time.sleep(5)  # 준비 단계는 느리게
     

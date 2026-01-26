@@ -37,7 +37,7 @@ interface GroupReturnSummary {
 
 const App: React.FC = () => {
   const { isMobile } = useResponsive();
-  const [currentPage, setCurrentPage] = useState<PageType>('recommendations');
+  const [currentPage, setCurrentPage] = useState<PageType>('autotrading');
   const [groups, setGroups] = useState<StockGroup[]>([]);
   const [selectedStockId, setSelectedStockId] = useState<string | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);

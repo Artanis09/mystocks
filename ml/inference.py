@@ -222,7 +222,7 @@ def predict_next_day(
         df['market_cap'] = df['close'] * df['shares']
     except Exception as e:
         print(f"[WARN] Failed to load market cap info: {e}")
-        df['market_cap'] = 1e12  # 정보 없으면 패스 (1조 가정)
+        df['market_cap'] = 0  # 정보 없으면 0으로 처리하여 필터링되게 함
     
     # 2. 피처 추출 및 예측
     X = df[feature_cols]

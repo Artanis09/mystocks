@@ -42,6 +42,7 @@ _scheduler_state = {
     "eod_done_today": False,       # 오늘 9시~10시 EOD 실행 여부
     "intraday_done_today": False,  # 오늘 15시~15시30분 Intraday 실행 여부
     "inference_done_today": False, # 오늘 15시~15시30분 Inference 실행 여부
+    "auto_start_done_today": False, # 오늘 자동매매 자동시작 실행 여부
     "last_check_date": None,       # 마지막 체크 날짜
     "crawling_status": None,       # 'eod' | 'intraday' | None
     "crawling_start_time": None,   # 크롤링 시작 시간
@@ -289,6 +290,14 @@ class PortfolioHistory(db.Model):
     created_at = db.Column(db.String(50), nullable=False)
     
     __table_args__ = (db.UniqueConstraint('group_id', 'date', name='unique_group_date'),)
+
+
+# 자동매매 설정 모델 (서버 저장)
+class AutoTradingSettings(db.Model):
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    key = db.Column(db.String(50), unique=True, nullable=False)
+    value = db.Column(db.Text, nullable=False)
+    updated_at = db.Column(db.String(50), nullable=False)
 
 
 def load_fundamentals_json() -> dict:
@@ -2712,6 +2721,7 @@ def reset_scheduler_state_if_new_day():
             _scheduler_state["eod_done_today"] = False
             _scheduler_state["intraday_done_today"] = False
             _scheduler_state["inference_done_today"] = False
+            _scheduler_state["auto_start_done_today"] = False
             _scheduler_state["last_check_date"] = today
             _scheduler_state["crawling_status"] = None
             _scheduler_state["crawling_error"] = None
@@ -3096,16 +3106,47 @@ def scheduler_tick():
         eod_done = _scheduler_state["eod_done_today"]
         intraday_done = _scheduler_state["intraday_done_today"]
         inference_done = _scheduler_state["inference_done_today"]
+        auto_start_done = _scheduler_state["auto_start_done_today"]
         crawling = _scheduler_state["crawling_status"]
     
     # 크롤링 중이면 스킵
     if crawling:
         return
     
-    # 9시~10시: EOD 모드로 유니버스 캐시 생성 (1회)
-    if 9 <= hour < 10 and not eod_done:
-        print(f"[Scheduler] Time window 09:00-10:00, running EOD crawl...")
-        threading.Thread(target=run_crawl_eod, daemon=True).start()
+    # 08:35~08:50: 자동매매 자동 시작 체크
+    if hour == 8 and 35 <= minute <= 50 and not auto_start_done:
+        try:
+            # DB에서 auto_start_mode 설정 확인
+            auto_start_setting = AutoTradingSettings.query.filter_by(key='auto_start_mode').first()
+            if auto_start_setting and auto_start_setting.value == 'auto':
+                # 거래일인지 확인
+                trading_day_check = is_trading_day()
+                if trading_day_check:
+                    # 엔진이 이미 실행중인지 확인
+                    if _auto_trading_engine is None or not _auto_trading_engine.is_running():
+                        print(f"[Scheduler] Auto-start enabled and it's a trading day. Starting auto-trading engine...")
+                        # 자동매매 시작
+                        global _auto_trading_thread
+                        mode = 'mock'  # 기본값은 모의투자
+                        mode_setting = AutoTradingSettings.query.filter_by(key='trading_mode').first()
+                        if mode_setting:
+                            mode = mode_setting.value
+                        
+                        engine = AutoTradingEngine(is_mock=(mode == 'mock'))
+                        _auto_trading_engine = engine
+                        _auto_trading_thread = threading.Thread(target=engine.run, daemon=True)
+                        _auto_trading_thread.start()
+                        print(f"[Scheduler] Auto-trading engine started in {mode} mode.")
+                        send_ntfy_notification(f"🤖 자동매매 자동 시작됨 ({mode} 모드)")
+                    else:
+                        print(f"[Scheduler] Auto-trading engine already running.")
+                else:
+                    print(f"[Scheduler] Not a trading day, skipping auto-start.")
+            
+            with _scheduler_lock:
+                _scheduler_state["auto_start_done_today"] = True
+        except Exception as e:
+            print(f"[Scheduler] Auto-start check failed: {e}")
     
     # 15시~15시30분: Intraday 모드로 유니버스 업데이트 + Inference (1회)
     if hour == 15 and 0 <= minute < 30:
@@ -3117,6 +3158,11 @@ def scheduler_tick():
                 if success and not _scheduler_state["inference_done_today"]:
                     run_inference_for_models()
             threading.Thread(target=intraday_then_inference, daemon=True).start()
+
+    # 16시~17시: EOD 모드로 최종 종가 수집 및 유니버스 캐시 생성 (1회)
+    if 16 <= hour < 17 and not eod_done:
+        print(f"[Scheduler] Time window 16:00-17:00, running EOD crawl for final prices...")
+        threading.Thread(target=run_crawl_eod, daemon=True).start()
 
 
 def scheduler_loop():
@@ -3365,13 +3411,26 @@ KIS_ACCOUNT_NO = os.getenv("KIS_ACCOUNT_NO", "")  # 예: "12345678-01"
 # 자산 히스토리 (간단한 메모리 저장, 실제 서비스에서는 DB 사용)
 _asset_history = []
 
-def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET", body=None):
-    """KIS 트레이딩 API 호출 (계좌 조회, 주문 등)"""
+def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET", body=None, use_mock=True):
+    """KIS 트레이딩 API 호출 (계좌 조회, 주문 등)
+    
+    Args:
+        use_mock: True면 모의투자 URL/TR_ID 사용, False면 실전투자
+    """
     token = get_kis_access_token()
     if not token:
         return {"error": "토큰 발급 실패"}
     
-    url = f"https://openapi.koreainvestment.com:9443{endpoint}"
+    # 모의투자/실전투자에 따라 URL과 TR_ID 변경
+    if use_mock:
+        base_url = "https://openapivts.koreainvestment.com:29443"
+        # TR_ID 앞자리를 V로 변경 (모의투자)
+        if tr_id.startswith("T"):
+            tr_id = "V" + tr_id[1:]
+    else:
+        base_url = "https://openapi.koreainvestment.com:9443"
+    
+    url = f"{base_url}{endpoint}"
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
@@ -3387,7 +3446,7 @@ def call_kis_trading_api(endpoint, params=None, tr_id="TTTC8434R", method="GET",
         else:
             response = requests.get(url, headers=headers, params=params, timeout=10)
         
-        print(f"KIS Trading API [{tr_id}] 응답: {response.status_code}")
+        print(f"KIS Trading API [{tr_id}] 응답: {response.status_code} (mock={use_mock})")
         if response.status_code != 200:
             return {"error": f"API 오류: {response.status_code}", "detail": response.text}
         
@@ -3440,11 +3499,12 @@ def api_kis_account_balance():
             "CTX_AREA_NK100": ""
         }
         
-        # 잔고조회 API (TTTC8434R: 주식잔고조회)
+        # 잔고조회 API (TTTC8434R: 주식잔고조회) - 모의투자 모드 사용
         result = call_kis_trading_api(
             "/uapi/domestic-stock/v1/trading/inquire-balance",
             params=params,
-            tr_id="TTTC8434R"
+            tr_id="TTTC8434R",
+            use_mock=True  # 모의투자 모드
         )
         
         if "error" in result:
@@ -3531,7 +3591,8 @@ def api_kis_order_available():
         result = call_kis_trading_api(
             "/uapi/domestic-stock/v1/trading/inquire-psbl-order",
             params=params,
-            tr_id="TTTC8908R"
+            tr_id="TTTC8908R",
+            use_mock=True
         )
         
         if "error" in result:
@@ -3588,7 +3649,8 @@ def api_kis_order():
             "/uapi/domestic-stock/v1/trading/order-cash",
             tr_id=tr_id,
             method="POST",
-            body=body
+            body=body,
+            use_mock=True
         )
         
         if "error" in result:
@@ -3660,7 +3722,8 @@ def api_kis_batch_order():
                 "/uapi/domestic-stock/v1/trading/order-cash",
                 tr_id=tr_id,
                 method="POST",
-                body=body
+                body=body,
+                use_mock=True
             )
             
             if "error" in result:
@@ -4053,6 +4116,96 @@ def api_auto_trading_logs():
         })
     except Exception as e:
         print(f"로그 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/settings', methods=['GET'])
+def api_auto_trading_settings_get():
+    """자동매매 설정 조회 (서버 저장)"""
+    try:
+        settings = {}
+        rows = AutoTradingSettings.query.all()
+        for row in rows:
+            try:
+                settings[row.key] = json.loads(row.value)
+            except:
+                settings[row.key] = row.value
+        
+        # 기본값 설정
+        defaults = {
+            'auto_start_enabled': False,
+            'auto_start_mode': 'manual'  # 'auto' | 'manual'
+        }
+        for key, default_val in defaults.items():
+            if key not in settings:
+                settings[key] = default_val
+        
+        return jsonify({"success": True, "settings": settings})
+    except Exception as e:
+        print(f"자동매매 설정 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/settings', methods=['POST'])
+def api_auto_trading_settings_set():
+    """자동매매 설정 저장 (서버 저장)"""
+    try:
+        data = request.get_json() or {}
+        now_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        
+        for key, value in data.items():
+            existing = AutoTradingSettings.query.filter_by(key=key).first()
+            value_str = json.dumps(value) if not isinstance(value, str) else value
+            
+            if existing:
+                existing.value = value_str
+                existing.updated_at = now_ts
+            else:
+                new_setting = AutoTradingSettings(
+                    key=key,
+                    value=value_str,
+                    updated_at=now_ts
+                )
+                db.session.add(new_setting)
+        
+        db.session.commit()
+        return jsonify({"success": True, "message": "설정이 저장되었습니다."})
+    except Exception as e:
+        print(f"자동매매 설정 저장 오류: {e}")
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/heartbeat', methods=['GET'])
+def api_auto_trading_heartbeat():
+    """엔진 실행 상태를 정확히 확인 (heartbeat 기반)"""
+    try:
+        engine = get_auto_trading_engine()
+        
+        # 엔진이 실행 중인지 확인
+        is_actually_running = engine._running and engine._thread is not None and engine._thread.is_alive()
+        
+        # 마지막 업데이트 시간 확인 (10초 이상 지나면 죽은 것으로 간주)
+        last_update = engine.state.last_update
+        is_responsive = False
+        if last_update and is_actually_running:
+            try:
+                last_dt = datetime.fromisoformat(last_update)
+                diff_seconds = (datetime.now() - last_dt).total_seconds()
+                is_responsive = diff_seconds < 10
+            except:
+                pass
+        
+        return jsonify({
+            "success": True,
+            "is_running": is_actually_running,
+            "is_responsive": is_responsive,
+            "last_update": last_update,
+            "phase": engine.state.phase.value if engine.state.phase else 'IDLE',
+            "thread_alive": engine._thread.is_alive() if engine._thread else False
+        })
+    except Exception as e:
+        print(f"Heartbeat 확인 오류: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

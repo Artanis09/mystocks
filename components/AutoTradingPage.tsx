@@ -27,7 +27,13 @@ import {
   Eye,
   EyeOff,
   Wallet,
-  XCircle
+  XCircle,
+  Power,
+  ToggleLeft,
+  ToggleRight,
+  CircleDot,
+  Wifi,
+  WifiOff
 } from 'lucide-react';
 
 // Use relative path for API calls to work with domain/proxy
@@ -124,6 +130,19 @@ interface StrategyStatus {
   is_mock?: boolean;
 }
 
+interface HeartbeatStatus {
+  is_running: boolean;
+  is_responsive: boolean;
+  last_update: string;
+  phase: string;
+  thread_alive: boolean;
+}
+
+interface AutoTradingSettings {
+  auto_start_enabled: boolean;
+  auto_start_mode: 'auto' | 'manual';
+}
+
 // 포맷 함수
 const formatPrice = (price: number) => {
   return new Intl.NumberFormat('ko-KR').format(price);
@@ -192,6 +211,16 @@ export const AutoTradingPage: React.FC = () => {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
+  // Heartbeat 상태 (엔진 실행 여부 신뢰성 확인)
+  const [heartbeat, setHeartbeat] = useState<HeartbeatStatus | null>(null);
+  
+  // 서버 저장 설정
+  const [serverSettings, setServerSettings] = useState<AutoTradingSettings>({
+    auto_start_enabled: false,
+    auto_start_mode: 'manual'
+  });
+  const [isLoadingSettings, setIsLoadingSettings] = useState(false);
+  
   // UI 상태
   const [showLogs, setShowLogs] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
@@ -211,6 +240,19 @@ export const AutoTradingPage: React.FC = () => {
   // 모드 전환
   const [isSwitchingMode, setIsSwitchingMode] = useState(false);
   const [isTradingDay, setIsTradingDay] = useState<boolean | null>(null);
+
+  // Heartbeat 조회 (엔진 실행 여부 신뢰성 확인)
+  const fetchHeartbeat = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/heartbeat`);
+      const data = await response.json();
+      if (data.success) {
+        setHeartbeat(data);
+      }
+    } catch (err) {
+      console.error('Heartbeat 조회 실패:', err);
+    }
+  }, []);
 
   // 상태 조회
   const fetchStatus = useCallback(async () => {
@@ -246,6 +288,44 @@ export const AutoTradingPage: React.FC = () => {
       console.error('설정 조회 실패:', err);
     }
   }, []);
+
+  // 서버 저장 설정 조회
+  const fetchServerSettings = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/settings`);
+      const data = await response.json();
+      if (data.success && data.settings) {
+        setServerSettings({
+          auto_start_enabled: data.settings.auto_start_enabled ?? false,
+          auto_start_mode: data.settings.auto_start_mode ?? 'manual'
+        });
+      }
+    } catch (err) {
+      console.error('서버 설정 조회 실패:', err);
+    }
+  }, []);
+
+  // 서버 저장 설정 업데이트
+  const updateServerSettings = async (newSettings: Partial<AutoTradingSettings>) => {
+    setIsLoadingSettings(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newSettings)
+      });
+      const data = await response.json();
+      if (data.success) {
+        setServerSettings(prev => ({ ...prev, ...newSettings }));
+      } else {
+        alert(data.error || '설정 저장 실패');
+      }
+    } catch (err) {
+      alert('서버 연결 실패');
+    } finally {
+      setIsLoadingSettings(false);
+    }
+  };
   
   // 설정 업데이트
   const handleUpdateConfig = async () => {
@@ -471,10 +551,19 @@ export const AutoTradingPage: React.FC = () => {
     fetchConfig();
     fetchTradeHistory();
     fetchTradingDayStatus();
+    fetchServerSettings();
+    fetchHeartbeat();
     
-    const interval = setInterval(fetchStatus, 3000); // 3초마다 갱신
+    const interval = setInterval(() => {
+      fetchStatus();
+      fetchHeartbeat();
+    }, 3000); // 3초마다 갱신
     return () => clearInterval(interval);
-  }, [fetchStatus, fetchConfig, fetchTradeHistory, fetchTradingDayStatus]);
+  }, [fetchStatus, fetchConfig, fetchTradeHistory, fetchTradingDayStatus, fetchServerSettings, fetchHeartbeat]);
+
+  // 엔진 실행 여부 (heartbeat 기반 - 더 신뢰성 있음)
+  const isEngineRunning = heartbeat?.is_running && heartbeat?.is_responsive;
+  const isEngineResponsive = heartbeat?.is_responsive ?? false;
 
   if (isLoading) {
     return (
@@ -547,7 +636,7 @@ export const AutoTradingPage: React.FC = () => {
             </button>
           </div>
           
-          {status?.is_running ? (
+          {isEngineRunning ? (
             <button
               onClick={handleStop}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-500 text-white font-bold hover:bg-rose-600 transition-all"
@@ -560,7 +649,7 @@ export const AutoTradingPage: React.FC = () => {
               onClick={handleStart}
               className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500 text-white font-bold hover:bg-emerald-600 transition-all"
             >
-              <Play className="w-4 h-4" />
+              <Power className="w-4 h-4" />
               시작
             </button>
           )}
@@ -592,6 +681,73 @@ export const AutoTradingPage: React.FC = () => {
           <p className="text-rose-400 text-sm">{error}</p>
         </div>
       )}
+
+      {/* 엔진 상태 & 자동시작 설정 */}
+      <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-4 mb-6">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          {/* 엔진 상태 표시 (Heartbeat 기반) */}
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              {isEngineRunning ? (
+                <>
+                  <Wifi className="w-5 h-5 text-emerald-400 animate-pulse" />
+                  <span className="text-emerald-400 font-bold">엔진 동작중</span>
+                </>
+              ) : heartbeat?.is_running && !isEngineResponsive ? (
+                <>
+                  <WifiOff className="w-5 h-5 text-amber-400" />
+                  <span className="text-amber-400 font-bold">엔진 응답 없음</span>
+                </>
+              ) : (
+                <>
+                  <CircleDot className="w-5 h-5 text-slate-500" />
+                  <span className="text-slate-500 font-bold">엔진 정지</span>
+                </>
+              )}
+            </div>
+            
+            {heartbeat && (
+              <span className="text-xs text-slate-500">
+                마지막 업데이트: {heartbeat.last_update ? new Date(heartbeat.last_update).toLocaleTimeString() : '-'}
+              </span>
+            )}
+          </div>
+          
+          {/* 자동/수동 시작 토글 */}
+          <div className="flex items-center gap-3">
+            <span className="text-sm text-slate-400">매일 자동 시작:</span>
+            <button
+              onClick={() => {
+                const newMode = serverSettings.auto_start_mode === 'auto' ? 'manual' : 'auto';
+                updateServerSettings({ auto_start_mode: newMode, auto_start_enabled: newMode === 'auto' });
+              }}
+              disabled={isLoadingSettings}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg transition-all font-bold text-sm ${
+                serverSettings.auto_start_mode === 'auto'
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-slate-700 text-slate-400 border border-slate-600'
+              }`}
+            >
+              {serverSettings.auto_start_mode === 'auto' ? (
+                <>
+                  <ToggleRight className="w-5 h-5" />
+                  자동
+                </>
+              ) : (
+                <>
+                  <ToggleLeft className="w-5 h-5" />
+                  수동
+                </>
+              )}
+            </button>
+            <span className="text-xs text-slate-500">
+              {serverSettings.auto_start_mode === 'auto' 
+                ? '매 거래일 08:40 자동 시작' 
+                : '수동으로 시작 버튼 클릭 필요'}
+            </span>
+          </div>
+        </div>
+      </div>
 
       {/* 통계 카드 */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 md:gap-4 mb-6">
