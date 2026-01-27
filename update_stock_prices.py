@@ -39,19 +39,22 @@ _kis_api_cache = {}
 # 스케줄러 상태 관리
 # =============================
 _scheduler_state = {
-    "eod_done_today": False,       # 오늘 9시~10시 EOD 실행 여부
-    "intraday_done_today": False,  # 오늘 15시~15시30분 Intraday 실행 여부
-    "inference_done_today": False, # 오늘 15시~15시30분 Inference 실행 여부
+    "eod_done_today": False,       # 오늘 16시 EOD 실행 여부
+    "universe_done_today": False,  # 오늘 20시 유니버스 자동 구축 실행 여부
+    "inference_done_today": False, # Inference 실행 여부
     "auto_start_done_today": False, # 오늘 자동매매 자동시작 실행 여부
     "last_check_date": None,       # 마지막 체크 날짜
-    "crawling_status": None,       # 'eod' | 'intraday' | None
+    "crawling_status": None,       # 'eod' | 'universe' | None
     "crawling_start_time": None,   # 크롤링 시작 시간
     "crawling_error": None,        # 크롤링 에러 메시지
     # 최근 수집 완료 정보
     "last_crawl_completed_at": None,  # 마지막 수집 완료 시간 (ISO 형식)
-    "last_crawl_mode": None,          # 마지막 수집 모드 ('eod', 'intraday', 'manual')
+    "last_crawl_mode": None,          # 마지막 수집 모드 ('eod', 'manual')
     "last_crawl_date_range": None,    # 마지막 수집 날짜 범위
     "last_crawl_duration": None,      # 마지막 수집 소요시간 (초)
+    # 유니버스 구축 정보
+    "last_universe_build_date": None, # 마지막 유니버스 구축 날짜 (YYYY-MM-DD)
+    "last_universe_target_date": None, # 유니버스가 사용할 대상 날짜 (YYYY-MM-DD)
 }
 _scheduler_lock = threading.Lock()
 
@@ -2719,7 +2722,7 @@ def reset_scheduler_state_if_new_day():
     with _scheduler_lock:
         if _scheduler_state["last_check_date"] != today:
             _scheduler_state["eod_done_today"] = False
-            _scheduler_state["intraday_done_today"] = False
+            _scheduler_state["universe_done_today"] = False
             _scheduler_state["inference_done_today"] = False
             _scheduler_state["auto_start_done_today"] = False
             _scheduler_state["last_check_date"] = today
@@ -2791,7 +2794,7 @@ def run_crawl_eod(max_retries: int = 3):
         _scheduler_state["crawling_start_time"] = start_time.isoformat()
         _scheduler_state["crawling_error"] = None
     
-    print("[Scheduler] Starting EOD crawl (--mode eod --merge)...")
+    print("[Scheduler] Starting EOD crawl (--mode eod --workers 2 --merge)...")
     
     for attempt in range(max_retries):
         # 네트워크 연결 확인
@@ -2806,7 +2809,7 @@ def run_crawl_eod(max_retries: int = 3):
         
         try:
             result = subprocess.run(
-                [sys.executable, "crawl.py", "--mode", "eod", "--workers", "8", "--merge"],
+                [sys.executable, "crawl.py", "--mode", "eod", "--workers", "2", "--merge"],
                 cwd=os.path.dirname(__file__) or ".",
                 capture_output=True,
                 text=True,
@@ -2915,6 +2918,82 @@ def _repair_partition_if_needed(target_date: str) -> bool:
             return False
     except Exception as e:
         print(f"[Repair] Exception during repair: {e}")
+        return False
+
+
+def run_auto_universe_build():
+    """
+    자동 유니버스 구축 (매일 저녁 8시에 실행)
+    - 오후 6시~23:59: 당일 데이터로 구축 (내일용)
+    - 00:00~오후 4시: 전일 데이터로 구축 (오늘용)
+    - 오후 4시~6시: 실행 금지
+    """
+    global _scheduler_state
+    
+    now = datetime.now()
+    current_hour = now.hour
+    today = now.strftime('%Y-%m-%d')
+    
+    # 오후 4시~6시 실행 금지
+    if 16 <= current_hour < 18:
+        print("[Scheduler] Universe build blocked (16:00-18:00)")
+        return False
+    
+    # 타겟 날짜 결정
+    if current_hour >= 18:  # 오후 6시 이후: 당일 데이터
+        target_date = today
+    else:  # 오전 0시~오후 4시: 전일 데이터
+        yesterday = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+        target_date = yesterday
+    
+    print(f"[Scheduler] Starting auto universe build for date={target_date}...")
+    
+    try:
+        # auto_trading_strategy1.py의 build_universe 함수 호출
+        from auto_trading_strategy1 import build_universe_for_date
+        
+        result = build_universe_for_date(target_date)
+        
+        if result.get("success"):
+            with _scheduler_lock:
+                _scheduler_state["universe_done_today"] = True
+                _scheduler_state["last_universe_build_date"] = now.isoformat()
+                _scheduler_state["last_universe_target_date"] = target_date
+            
+            stock_count = result.get("count", 0)
+            print(f"[Scheduler] Universe build completed: {stock_count} stocks for {target_date}")
+            send_ntfy_notification(f"유니버스 구축 완료: {stock_count}종목 ({target_date})")
+            return True
+        else:
+            error = result.get("error", "Unknown error")
+            print(f"[Scheduler] Universe build failed: {error}")
+            return False
+            
+    except ImportError as e:
+        print(f"[Scheduler] Could not import build_universe_for_date: {e}")
+        # Fallback: subprocess로 직접 호출
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", f"from auto_trading_strategy1 import build_universe_for_date; print(build_universe_for_date('{target_date}'))"],
+                cwd=os.path.dirname(__file__) or ".",
+                capture_output=True,
+                text=True,
+                timeout=300
+            )
+            if result.returncode == 0:
+                with _scheduler_lock:
+                    _scheduler_state["universe_done_today"] = True
+                    _scheduler_state["last_universe_build_date"] = now.isoformat()
+                    _scheduler_state["last_universe_target_date"] = target_date
+                print(f"[Scheduler] Universe build completed via subprocess for {target_date}")
+                send_ntfy_notification(f"유니버스 구축 완료 ({target_date})")
+                return True
+        except Exception as sub_e:
+            print(f"[Scheduler] Subprocess universe build failed: {sub_e}")
+        return False
+        
+    except Exception as e:
+        print(f"[Scheduler] Universe build exception: {e}")
         return False
 
 
@@ -3104,8 +3183,7 @@ def scheduler_tick():
     
     with _scheduler_lock:
         eod_done = _scheduler_state["eod_done_today"]
-        intraday_done = _scheduler_state["intraday_done_today"]
-        inference_done = _scheduler_state["inference_done_today"]
+        universe_done = _scheduler_state.get("universe_done_today", False)
         auto_start_done = _scheduler_state["auto_start_done_today"]
         crawling = _scheduler_state["crawling_status"]
     
@@ -3148,21 +3226,15 @@ def scheduler_tick():
         except Exception as e:
             print(f"[Scheduler] Auto-start check failed: {e}")
     
-    # 15시~15시30분: Intraday 모드로 유니버스 업데이트 + Inference (1회)
-    if hour == 15 and 0 <= minute < 30:
-        if not intraday_done:
-            print(f"[Scheduler] Time window 15:00-15:30, running intraday crawl...")
-            # 동기적으로 실행하여 완료 후 inference 실행
-            def intraday_then_inference():
-                success = run_crawl_intraday()
-                if success and not _scheduler_state["inference_done_today"]:
-                    run_inference_for_models()
-            threading.Thread(target=intraday_then_inference, daemon=True).start()
-
-    # 16시~17시: EOD 모드로 최종 종가 수집 및 유니버스 캐시 생성 (1회)
-    if 16 <= hour < 17 and not eod_done:
-        print(f"[Scheduler] Time window 16:00-17:00, running EOD crawl for final prices...")
+    # 16:00~16:10: EOD 모드로 최종 종가 수집 (workers=2)
+    if hour == 16 and 0 <= minute <= 10 and not eod_done:
+        print(f"[Scheduler] Time 16:00, running EOD crawl with 2 workers...")
         threading.Thread(target=run_crawl_eod, daemon=True).start()
+    
+    # 20:00~20:10: 유니버스 자동 구축
+    if hour == 20 and 0 <= minute <= 10 and not universe_done:
+        print(f"[Scheduler] Time 20:00, running auto universe build...")
+        threading.Thread(target=run_auto_universe_build, daemon=True).start()
 
 
 def scheduler_loop():
@@ -3975,32 +4047,169 @@ def api_auto_trading_refresh_positions():
         return jsonify({"success": False, "error": str(e)}), 500
 
 
+@app.route('/api/auto-trading/start-with-predictions', methods=['POST'])
+def api_auto_trading_start_with_predictions():
+    """AI 예측 종목으로 자동매매 시작
+    
+    Request Body:
+    {
+        "stocks": [{"code": "005930", "name": "삼성전자", "prev_close": 70000, ...}, ...],
+        "allocation_percent": 80,  # 전체 자산 중 할당 비율 (%)
+        "order_type": "prev_close"  # 'prev_close': 전일종가 지정가, 'market': 시장가
+    }
+    """
+    try:
+        data = request.get_json() or {}
+        stocks = data.get('stocks', [])
+        allocation_percent = data.get('allocation_percent', 100)  # 기본 100%
+        order_type = data.get('order_type', 'prev_close')
+        
+        if not stocks:
+            return jsonify({"success": False, "error": "종목 목록이 비어있습니다."}), 400
+        
+        engine = get_auto_trading_engine()
+        
+        # 설정에서 투자금 비율 저장
+        try:
+            existing = AutoTradingSettings.query.filter_by(key='allocation_percent').first()
+            if existing:
+                existing.value = json.dumps(allocation_percent)
+                existing.updated_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            else:
+                new_setting = AutoTradingSettings(
+                    key='allocation_percent',
+                    value=json.dumps(allocation_percent),
+                    updated_at=datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                )
+                db.session.add(new_setting)
+            db.session.commit()
+        except Exception as e:
+            print(f"투자금 비율 저장 오류: {e}")
+        
+        # 기존 WATCHING/IDLE 상태의 포지션 제거
+        from auto_trading_strategy1 import Position, PositionState, UniverseStock
+        
+        positions_to_keep = {k: v for k, v in engine.state.positions.items() 
+                            if v.state in (PositionState.ENTERED, PositionState.EXIT_PENDING)}
+        engine.state.positions = positions_to_keep
+        
+        # 새 유니버스 생성
+        universe = []
+        now = datetime.now()
+        today = now.strftime('%Y-%m-%d')
+        
+        for stock in stocks:
+            code = str(stock.get('code', '')).zfill(6)
+            name = stock.get('name', '')
+            # prev_close는 base_price(전일종가) 또는 current_price 사용
+            prev_close = stock.get('base_price') or stock.get('prev_close') or stock.get('current_price', 0)
+            market_cap = stock.get('market_cap', 0)
+            change_rate = stock.get('probability', 0) * 100  # 확률을 기록용으로 사용
+            
+            us = UniverseStock(
+                code=code,
+                name=name,
+                prev_close=prev_close,
+                change_rate=change_rate,
+                market_cap=market_cap,
+                added_date=today
+            )
+            universe.append(us)
+            
+            # Position 생성 - WATCHING 상태로
+            if code not in engine.state.positions:
+                pos = Position(
+                    code=code,
+                    name=name,
+                    state=PositionState.WATCHING,
+                    prev_close=prev_close,
+                    market_cap=market_cap
+                )
+                engine.state.positions[code] = pos
+        
+        engine.state.universe = universe
+        
+        # 투자금 비율 적용
+        if allocation_percent < 100:
+            # total_asset에서 할당 비율만큼만 사용하도록 조정
+            # MAX_POSITIONS 계산 시 allocation 반영됨
+            engine.state.total_asset = engine.state.total_asset * allocation_percent / 100
+        
+        engine._save_state()
+        
+        # 자동매매 시작
+        result = engine.start()
+        
+        return jsonify({
+            "success": True,
+            "message": f"{len(universe)}개 종목으로 자동매매를 시작합니다. (투자금 비율: {allocation_percent}%)",
+            "universe_count": len(universe),
+            "allocation_percent": allocation_percent,
+            "order_type": order_type,
+            **result
+        })
+    except Exception as e:
+        print(f"AI 예측 자동매매 시작 오류: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
 @app.route('/api/auto-trading/build-universe', methods=['POST'])
 def api_auto_trading_build_universe():
-    """유니버스 수동 구축"""
+    """유니버스 수동 구축 (4PM~6PM 사이 실행 불가)"""
     try:
+        # 시간 체크: 오후 4시~6시 사이 실행 불가
+        now = datetime.now()
+        if 16 <= now.hour < 18:
+            return jsonify({
+                "success": False, 
+                "error": "유니버스 구축은 오후 4시~6시 사이에는 실행할 수 없습니다. (데이터 수집 중)"
+            }), 400
+        
         engine = get_auto_trading_engine()
         universe = engine.build_universe()
         
-        # 상태에 저장
+        # 기존 유니버스 및 positions 클리어 (데이터 섞임 방지)
+        from auto_trading_strategy1 import Position, PositionState
+        
+        # ENTERED, EXIT_PENDING 상태가 아닌 포지션만 제거 (보유중 종목은 유지)
+        positions_to_keep = {k: v for k, v in engine.state.positions.items() 
+                            if v.state in (PositionState.ENTERED, PositionState.EXIT_PENDING)}
+        engine.state.positions = positions_to_keep
+        
+        # 새 유니버스 저장
         engine.state.universe = universe
         
-        # 포지션 초기화
+        # 새 유니버스 종목을 positions에 추가
         for stock in universe:
             if stock.code not in engine.state.positions:
-                from auto_trading_strategy1 import Position, PositionState
                 engine.state.positions[stock.code] = Position(
                     code=stock.code,
                     name=stock.name,
                     state=PositionState.WATCHING,
-                    prev_close=stock.prev_close
+                    prev_close=stock.prev_close,
+                    prev_high=getattr(stock, 'prev_high', 0),
+                    market_cap=stock.market_cap
                 )
         
         engine._save_state()
         
+        # 유니버스 구축 정보 업데이트
+        with _scheduler_lock:
+            _scheduler_state["last_universe_build_date"] = now.isoformat()
+            # 타겟 날짜: 6PM 이후면 오늘, 아니면 전일
+            if now.hour >= 18:
+                target_date = now.strftime('%Y-%m-%d')
+            else:
+                from datetime import timedelta
+                target_date = (now - timedelta(days=1)).strftime('%Y-%m-%d')
+            _scheduler_state["last_universe_target_date"] = target_date
+        
         return jsonify({
             "success": True,
             "count": len(universe),
+            "target_date": target_date,
             "universe": [
                 {
                     "code": s.code,

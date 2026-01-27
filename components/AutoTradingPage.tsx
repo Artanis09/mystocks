@@ -162,12 +162,13 @@ const formatTime = (isoString: string) => {
 const StateBadge: React.FC<{ state: string }> = ({ state }) => {
   const stateConfig: Record<string, { bg: string; text: string; label: string; description: string }> = {
     IDLE: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '대기', description: '초기 상태' },
-    WATCHING: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '감시중', description: '갭상승 감시 중' },
+    WATCHING: { bg: 'bg-amber-500/20', text: 'text-amber-400', label: '감시중', description: '갭+2% 조건 충족, 진입 감시 중' },
     ENTRY_PENDING: { bg: 'bg-blue-500/20', text: 'text-blue-400', label: '진입대기', description: '매수 주문 체결 대기' },
     ENTERED: { bg: 'bg-emerald-500/20', text: 'text-emerald-400', label: '보유중', description: '포지션 진입 완료' },
     EXIT_PENDING: { bg: 'bg-violet-500/20', text: 'text-violet-400', label: '청산대기', description: '매도 주문 체결 대기' },
     CLOSED: { bg: 'bg-slate-500/20', text: 'text-slate-400', label: '청산완료', description: '청산 완료' },
     SKIPPED: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '건너뜀', description: '진입 조건 미달로 건너뜀' },
+    DISQUALIFIED: { bg: 'bg-gray-500/20', text: 'text-gray-400', label: '탈락', description: '갭+2% 미충족으로 감시 제외' },
     ERROR: { bg: 'bg-rose-500/20', text: 'text-rose-400', label: '오류', description: '오류 발생' }
   };
 
@@ -241,6 +242,10 @@ export const AutoTradingPage: React.FC = () => {
   // 모드 전환
   const [isSwitchingMode, setIsSwitchingMode] = useState(false);
   const [isTradingDay, setIsTradingDay] = useState<boolean | null>(null);
+  
+  // 투자금 할당 비율
+  const [allocationPercent, setAllocationPercent] = useState<number>(80);
+  const [isSavingAllocation, setIsSavingAllocation] = useState(false);
 
   // Heartbeat 조회 (엔진 실행 여부 신뢰성 확인)
   const fetchHeartbeat = useCallback(async () => {
@@ -300,11 +305,37 @@ export const AutoTradingPage: React.FC = () => {
           auto_start_enabled: data.settings.auto_start_enabled ?? false,
           auto_start_mode: data.settings.auto_start_mode ?? 'manual'
         });
+        // 투자금 할당 비율 불러오기
+        if (data.settings.allocation_percent !== undefined) {
+          setAllocationPercent(data.settings.allocation_percent);
+        }
       }
     } catch (err) {
       console.error('서버 설정 조회 실패:', err);
     }
   }, []);
+
+  // 투자금 할당 비율 저장
+  const saveAllocationPercent = async (percent: number) => {
+    setIsSavingAllocation(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/settings`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allocation_percent: percent })
+      });
+      const data = await response.json();
+      if (data.success) {
+        setAllocationPercent(percent);
+      } else {
+        alert(data.error || '투자금 비율 저장 실패');
+      }
+    } catch (err) {
+      alert('서버 연결 실패');
+    } finally {
+      setIsSavingAllocation(false);
+    }
+  };
 
   // 서버 저장 설정 업데이트
   const updateServerSettings = async (newSettings: Partial<AutoTradingSettings>) => {
@@ -459,8 +490,20 @@ export const AutoTradingPage: React.FC = () => {
     }
   };
 
+  // 유니버스 구축 가능 여부 체크 (4PM~6PM은 비활성화)
+  const isUniverseBuildDisabled = () => {
+    const now = new Date();
+    const hour = now.getHours();
+    // 오후 4시(16시)~오후 6시(18시) 사이는 비활성화
+    return hour >= 16 && hour < 18;
+  };
+
   // 유니버스 구축
   const handleBuildUniverse = async () => {
+    if (isUniverseBuildDisabled()) {
+      alert('유니버스 구축은 오후 4시~6시 사이에는 실행할 수 없습니다.\n(데이터 수집 중)');
+      return;
+    }
     try {
       const response = await fetch(`${API_BASE_URL}/auto-trading/build-universe`, { method: 'POST' });
       const data = await response.json();
@@ -816,10 +859,17 @@ export const AutoTradingPage: React.FC = () => {
       <div className="flex flex-wrap gap-2 mb-6">
         <button
           onClick={handleBuildUniverse}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-all text-sm font-bold"
+          disabled={isUniverseBuildDisabled()}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+            isUniverseBuildDisabled()
+              ? 'bg-slate-500/10 border border-slate-500/30 text-slate-500 cursor-not-allowed'
+              : 'bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
+          }`}
+          title={isUniverseBuildDisabled() ? '16:00~18:00 데이터 수집 중 (구축 불가)' : '유니버스 구축'}
         >
           <Database className="w-4 h-4" />
           유니버스 구축
+          {isUniverseBuildDisabled() && <span className="text-xs">(수집중)</span>}
         </button>
         
         <button
@@ -853,6 +903,50 @@ export const AutoTradingPage: React.FC = () => {
           {showLogs ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
           로그
         </button>
+      </div>
+
+      {/* 투자금 할당 비율 설정 */}
+      <div className="bg-violet-500/10 border border-violet-500/30 rounded-2xl p-4 mb-6">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex items-center gap-3">
+            <div className="w-10 h-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
+              <Wallet className="w-5 h-5 text-violet-400" />
+            </div>
+            <div>
+              <h3 className="text-white font-bold text-sm">투자금 할당 비율</h3>
+              <p className="text-xs text-slate-400">총 자산 중 자동매매에 사용할 비율 (AI 예측 종목 자동매매 시 적용)</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2">
+              <input
+                type="range"
+                min="10"
+                max="100"
+                step="10"
+                value={allocationPercent}
+                onChange={(e) => setAllocationPercent(parseInt(e.target.value))}
+                className="w-32 accent-violet-500"
+              />
+              <div className="flex items-center bg-slate-800 rounded-lg px-3 py-1.5 min-w-[80px]">
+                <span className="text-white text-sm font-bold">{allocationPercent}</span>
+                <span className="text-violet-400 font-bold text-sm ml-1">%</span>
+              </div>
+            </div>
+            <button
+              onClick={() => saveAllocationPercent(allocationPercent)}
+              disabled={isSavingAllocation}
+              className="px-4 py-2 bg-violet-500/20 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 rounded-lg text-xs font-bold transition-all disabled:opacity-50"
+            >
+              {isSavingAllocation ? <Loader2 className="w-4 h-4 animate-spin" /> : '저장'}
+            </button>
+          </div>
+        </div>
+        <div className="mt-3 text-xs text-slate-500">
+          💡 총자산의 <span className="text-violet-400 font-bold">{allocationPercent}%</span>를 자동매매에 사용하고, 
+          각 종목당 <span className="text-point-cyan font-bold">1/{config?.max_positions || 5}</span> 균등 배분합니다.
+          (종목당 약 {((allocationPercent / (config?.max_positions || 5))).toFixed(1)}%)
+        </div>
       </div>
 
       {/* 전략 설정 패널 */}

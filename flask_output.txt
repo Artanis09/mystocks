@@ -1,5 +1,5 @@
 nohup: ignoring input
 Traceback (most recent call last):
-  File "/home/exedev/mystocks/update_stock_prices.py", line 1, in <module>
-    import pandas as pd
-ModuleNotFoundError: No module named 'pandas'
+  File "/home/exedev/mystocks/update_stock_prices.py", line 2, in <module>
+    from pykrx import stock
+ModuleNotFoundError: No module named 'pykrx'

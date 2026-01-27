@@ -775,6 +775,13 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   const [tradingMode, setTradingMode] = useState<'mock' | 'real'>('mock');
   const [isSwitchingMode, setIsSwitchingMode] = useState(false);
   
+  // =============================
+  // 자동매매 관련 상태
+  // =============================
+  const [allocationPercent, setAllocationPercent] = useState<number>(80); // 총자산 중 할당 비율 (%)
+  const [isStartingAutoTrade, setIsStartingAutoTrade] = useState(false);
+  const [autoTradeResult, setAutoTradeResult] = useState<{ success: boolean; message: string } | null>(null);
+  
   // Refs for visibility tracking
   const stockRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -1270,6 +1277,76 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
     // 실제 구현시에는 보유종목과 매칭하여 매도 수량 계산
   };
 
+  // =============================
+  // AI 예측 종목 자동매매 시작
+  // =============================
+  const handleStartAutoTradeWithPredictions = async (dateStocks: RecommendedStock[]) => {
+    if (dateStocks.length === 0) {
+      alert('자동매매에 사용할 종목이 없습니다.');
+      return;
+    }
+
+    const stockList = dateStocks.map(s => ({
+      code: s.code,
+      name: s.name,
+      base_price: s.base_price,
+      prev_close: s.base_price,
+      current_price: realtimePrices[s.code]?.current_price || s.current_price || s.base_price,
+      market_cap: s.market_cap,
+      probability: s.probability
+    }));
+
+    const summaryText = stockList.map(s => `${s.name}(${s.code}): ${s.base_price?.toLocaleString()}원`).join('\n');
+    
+    if (!window.confirm(
+      `[AI 예측 종목 자동매매 시작]\n` +
+      `───────────────────\n` +
+      `📊 종목 수: ${stockList.length}개\n` +
+      `💰 투자금 비율: 총자산의 ${allocationPercent}%\n` +
+      `⏰ 매수: 9시 장시작 시 전일종가 지정가\n` +
+      `🚫 미체결: 9:30까지 미체결 시 취소\n` +
+      `📉 손절: -4% 이하\n` +
+      `📈 익절: +10%\n` +
+      `───────────────────\n` +
+      `${summaryText}\n` +
+      `───────────────────\n` +
+      `진행하시겠습니까?`
+    )) {
+      return;
+    }
+
+    setIsStartingAutoTrade(true);
+    setAutoTradeResult(null);
+
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/start-with-predictions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          stocks: stockList,
+          allocation_percent: allocationPercent,
+          order_type: 'prev_close'
+        })
+      });
+
+      const data = await response.json();
+      
+      if (data.success) {
+        setAutoTradeResult({ success: true, message: data.message });
+        alert(`✅ 자동매매 시작!\n${data.message}`);
+      } else {
+        setAutoTradeResult({ success: false, message: data.error });
+        alert(`❌ 자동매매 시작 실패: ${data.error}`);
+      }
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : '서버 연결 실패';
+      setAutoTradeResult({ success: false, message: errMsg });
+      alert(`자동매매 시작 중 오류: ${errMsg}`);
+    } finally {
+      setIsStartingAutoTrade(false);
+    }
+  };
+
   const handleDeleteList = async (e: React.MouseEvent, date: string, filterTag: FilterTag) => {
     e.stopPropagation();
     if (!window.confirm(`${date} 날짜의 추천 목록을 삭제하시겠습니까?`)) {
@@ -1380,6 +1457,51 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
           <NoRecommendationsMessage hasError={!!error} errorMsg={error || undefined} />
         ) : (
           <div className="space-y-4 animate-in fade-in duration-500">
+            {/* 자동매매 투자금 설정 패널 */}
+            <div className="bg-violet-500/10 border border-violet-500/30 rounded-xl p-4 mb-4">
+              <div className="flex items-center justify-between flex-wrap gap-4">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                    <Wallet className="w-5 h-5 text-violet-400" />
+                  </div>
+                  <div>
+                    <h4 className="text-white font-bold text-sm">자동매매 투자금 설정</h4>
+                    <p className="text-xs text-slate-400">날짜별 "자동매매" 버튼 클릭 시 적용됩니다</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-slate-400">투자금 비율:</label>
+                    <div className="flex items-center bg-slate-800 rounded-lg px-3 py-1.5">
+                      <input
+                        type="number"
+                        min="10"
+                        max="100"
+                        step="10"
+                        value={allocationPercent}
+                        onChange={(e) => setAllocationPercent(Math.min(100, Math.max(10, parseInt(e.target.value) || 80)))}
+                        className="w-14 bg-transparent text-white text-sm font-bold text-right outline-none"
+                      />
+                      <span className="text-violet-400 font-bold text-sm ml-1">%</span>
+                    </div>
+                  </div>
+                  <div className="text-xs text-slate-500">
+                    = 총자산의 {allocationPercent}% 사용<br/>
+                    (종목당 1/{hasTodayRecommendations ? grouped[today]?.length || 5 : 5} 균등 배분)
+                  </div>
+                </div>
+              </div>
+              {autoTradeResult && (
+                <div className={`mt-3 p-2 rounded-lg text-sm ${
+                  autoTradeResult.success 
+                    ? 'bg-emerald-500/10 text-emerald-400' 
+                    : 'bg-rose-500/10 text-rose-400'
+                }`}>
+                  {autoTradeResult.message}
+                </div>
+              )}
+            </div>
+
             {/* 오늘 추천이 없으면 안내 메시지 */}
             {!hasTodayRecommendations && (
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 mb-4">
@@ -1430,6 +1552,24 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                     </div>
                     <div className="text-sm text-slate-500">{stocks.length}종목</div>
                     <div className="h-px bg-slate-800 flex-1"></div>
+
+                    {/* Auto Trading Start Button */}
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleStartAutoTradeWithPredictions(stocks);
+                      }}
+                      disabled={isStartingAutoTrade}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-500/10 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 rounded-lg text-xs font-bold transition-all disabled:opacity-50"
+                      title="이 날짜의 종목으로 자동매매 시작"
+                    >
+                      {isStartingAutoTrade ? (
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                      ) : (
+                        <Play className="w-3 h-3" />
+                      )}
+                      자동매매
+                    </button>
 
                     {/* Delete Date Group Button */}
                     <button

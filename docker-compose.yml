@@ -58,6 +58,8 @@ services:
       - ./scripts:/app/scripts
       # Persist data directory
       - ./data:/app/data
+      # Public assets (korea_stocks.csv for market cap lookup)
+      - ./public:/app/public
       # Persist database in a directory
       - db-data:/app/db
       # Config files

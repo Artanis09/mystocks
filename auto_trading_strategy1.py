@@ -140,19 +140,29 @@ def get_prev_trading_day(from_date: date = None) -> date:
 # =============================
 class StrategyConfig:
     """전략 파라미터 설정"""
-    # Setup 조건
+    # Setup 조건 (유니버스 필터)
     UPPER_LIMIT_RATE = 29.5      # 상한가 기준 수익률 (%)
-    MIN_MARKET_CAP = 500         # 최소 시가총액 (억원)
+    MIN_MARKET_CAP = 1000        # 최소 시가총액 (억원) - 1,000억 이상
+    MIN_TRADING_VALUE = 300      # 최소 거래대금 (억원) - 300억 이상
     
-    # Entry 조건
-    GAP_THRESHOLD = 2.0          # 갭상승 기준 (%)
+    # Entry 조건 (진입)
+    GAP_THRESHOLD_MIN = 2.0      # 갭상승 최소 기준 (%) - 시가 +2% 이상
+    GAP_THRESHOLD_MAX = 5.0      # 갭상승 최대 기준 (%) - 시가 +5% 이하
+    ENTRY_AT_PREV_CLOSE = True   # 전일종가(0%) 도달 시 매수
     GAP_CONFIRM_COUNT = 2        # 갭 확인 횟수 (노이즈 제거)
     ENTRY_START_TIME = "09:00"   # 진입 시작 시간
-    ENTRY_END_TIME = "09:03"     # 진입 종료 시간
+    ENTRY_END_TIME = "15:20"     # 진입 종료 시간 (종가 매도 전까지)
+    USE_LIMIT_ORDER_AT_OPEN = False  # 시가 지정가 대신 전일종가 지정가 사용
+    USE_LIMIT_ORDER_AT_PREV_CLOSE = True  # 전일종가 지정가 주문 (AI예측 모드용)
+    ENTRY_CANCEL_TIME = "09:30"  # 미체결 취소 시간 (9:30까지 미체결 시 취소)
     
-    # Exit 조건
+    # 시장 필터
+    USE_MARKET_FILTER = True     # KOSPI 5일선 필터 사용 여부
+    MARKET_MA_DAYS = 5           # KOSPI 이평선 기간
+    
+    # Exit 조건 (청산)
     TAKE_PROFIT_RATE = 10.0      # 익절 기준 (%)
-    STOP_LOSS_RATE = -3.0        # 손절 기준 (%)
+    STOP_LOSS_RATE = -4.0        # 손절 기준 (%) - 진입가 대비 -4%
     EOD_SELL_START = "15:20"     # EOD 청산 시작
     EOD_SELL_END = "15:28"       # EOD 청산 종료
     
@@ -178,12 +188,13 @@ class StrategyConfig:
 class PositionState(Enum):
     """종목별 전략 상태"""
     IDLE = "IDLE"                   # 미활성 상태
-    WATCHING = "WATCHING"           # 감시 중 (유니버스에 포함됨)
+    WATCHING = "WATCHING"           # 감시 중 (유니버스에 포함됨, 갭조건 충족)
     ENTRY_PENDING = "ENTRY_PENDING" # 진입 주문 대기/접수
     ENTERED = "ENTERED"             # 보유 중
     EXIT_PENDING = "EXIT_PENDING"   # 청산 주문 대기/접수
     CLOSED = "CLOSED"               # 청산 완료
     SKIPPED = "SKIPPED"             # 건너뜀 (조건 미충족, 오류 등)
+    DISQUALIFIED = "DISQUALIFIED"   # 탈락 (갭 조건 미충족, 감시 제외)
     ERROR = "ERROR"                 # 오류 상태
 
 
@@ -221,6 +232,8 @@ class Position:
     
     # 가격 정보
     prev_close: float = 0.0     # 전일 종가
+    prev_high: float = 0.0      # 전일 고가
+    open_price: float = 0.0     # 당일 시가
     entry_price: float = 0.0    # 진입가
     current_price: float = 0.0  # 현재가
     quantity: int = 0           # 보유 수량
@@ -233,6 +246,7 @@ class Position:
     order_id: str = ""          # 최근 주문번호
     pending_quantity: int = 0   # 미체결 수량
     order_time: str = ""        # 주문 시간 (미체결 타임아웃 체크용)
+    limit_order_price: float = 0.0  # 지정가 주문 가격 (시가 지정가)
     market_cap: float = 0.0     # 시가총액 (억원)
     
     # 이벤트 정보
@@ -252,6 +266,7 @@ class Position:
             'name': self.name,
             'state': self.state.value,
             'prev_close': self.prev_close,
+            'open_price': self.open_price,
             'entry_price': self.entry_price,
             'current_price': self.current_price,
             'quantity': self.quantity,
@@ -275,6 +290,7 @@ class Position:
         pos = cls(code=data['code'], name=data['name'])
         pos.state = PositionState(data.get('state', 'IDLE'))
         pos.prev_close = data.get('prev_close', 0.0)
+        pos.open_price = data.get('open_price', 0.0)
         pos.entry_price = data.get('entry_price', 0.0)
         pos.current_price = data.get('current_price', 0.0)
         pos.quantity = data.get('quantity', 0)
@@ -878,26 +894,156 @@ class AutoTradingEngine:
             'message': '주문 취소 완료'
         }
     
+    def _check_market_filter(self) -> bool:
+        """KOSPI 시장 필터: 지수가 5일 이평선 위에 있는지 확인
+        
+        Returns:
+            True: 진입 허용 (KOSPI > 5일선)
+            False: 진입 금지 (KOSPI < 5일선)
+        """
+        try:
+            # KOSPI 지수 코드
+            kospi_code = "0001"  # KIS API KOSPI 지수 코드
+            
+            # KIS API로 KOSPI 현재가 조회
+            from kis_api import get_domestic_stock_price
+            
+            price_data = get_domestic_stock_price(kospi_code, is_mock=self.is_mock)
+            if 'error' in price_data:
+                # API 오류 시 진입 허용 (보수적 접근 대신 기회 제공)
+                self._log_event('WARNING', 'MARKET_FILTER_ERROR', 
+                              f'KOSPI 조회 실패, 필터 통과 처리: {price_data.get("error")}')
+                return True
+            
+            current_kospi = price_data.get('current_price', 0)
+            
+            # pykrx로 5일 이평선 계산
+            try:
+                from pykrx import stock
+                from datetime import timedelta
+                
+                end_date = datetime.now().strftime('%Y%m%d')
+                start_date = (datetime.now() - timedelta(days=14)).strftime('%Y%m%d')
+                
+                kospi_df = stock.get_index_ohlcv_by_date(start_date, end_date, "1001")
+                if not kospi_df.empty and len(kospi_df) >= self.config.MARKET_MA_DAYS:
+                    ma5 = kospi_df['종가'].tail(self.config.MARKET_MA_DAYS).mean()
+                    
+                    if current_kospi > ma5:
+                        self._log_event('INFO', 'MARKET_FILTER_PASS', 
+                                      f'KOSPI {current_kospi:.2f} > 5일선 {ma5:.2f}')
+                        return True
+                    else:
+                        self._log_event('INFO', 'MARKET_FILTER_FAIL', 
+                                      f'KOSPI {current_kospi:.2f} < 5일선 {ma5:.2f}')
+                        return False
+            except Exception as e:
+                self._log_event('WARNING', 'MARKET_MA_ERROR', f'5일선 계산 실패: {e}')
+                return True  # 계산 실패 시 진입 허용
+            
+            return True
+            
+        except Exception as e:
+            self._log_event('ERROR', 'MARKET_FILTER_EXCEPTION', f'시장 필터 오류: {e}')
+            return True  # 오류 시 진입 허용
+    
     def _check_pending_timeout(self, position: Position) -> bool:
-        """미체결 주문 타임아웃 체크
+        """미체결 주문 타임아웃 체크 (15:20 경과 시 취소)
         
         Returns:
             True: 타임아웃 발생 (취소 필요)
             False: 정상 대기 중
         """
-        if not position.order_time:
-            return False
+        now = datetime.now()
         
-        try:
-            order_time = datetime.fromisoformat(position.order_time)
-            elapsed = (datetime.now() - order_time).total_seconds()
-            
-            if elapsed >= self.config.ENTRY_PENDING_TIMEOUT:
-                return True
-        except:
-            pass
+        # ENTRY_END_TIME 이후면 미체결 취소
+        entry_end = datetime.strptime(
+            f"{now.strftime('%Y-%m-%d')} {self.config.ENTRY_END_TIME}", 
+            '%Y-%m-%d %H:%M'
+        )
+        
+        if now >= entry_end:
+            self._log_event('INFO', 'PENDING_TIMEOUT', 
+                          f'진입 종료 시간({self.config.ENTRY_END_TIME}) 경과, 미체결 취소',
+                          code=position.code)
+            return True
         
         return False
+    
+    def _check_gap_disqualification(self, position: Position) -> bool:
+        """갭 조건 미충족 시 탈락 처리
+        
+        장 시작 후 시가(open_price)가 전일종가 대비 +2%~+5% 범위가 아니면 탈락
+        탈락된 종목은 DISQUALIFIED 상태로 변경되어 이후 감시에서 제외됨
+        
+        Returns:
+            True: 탈락 (갭 조건 미충족)
+            False: 통과 (갭 조건 충족, 계속 감시)
+        """
+        try:
+            # 현재가 및 시가 조회
+            price_data = self._get_current_price(position.code)
+            if not price_data:
+                self._log_event('WARNING', 'GAP_CHECK_FAIL', 
+                              f'{position.name}: 가격 조회 실패, 탈락 처리',
+                              code=position.code)
+                position.state = PositionState.DISQUALIFIED
+                position.error_message = '가격 조회 실패'
+                return True
+            
+            open_price = price_data.get('open_price', 0)
+            prev_close = position.prev_close
+            
+            if prev_close <= 0 or open_price <= 0:
+                self._log_event('WARNING', 'GAP_CHECK_INVALID', 
+                              f'{position.name}: 유효하지 않은 가격 (시가:{open_price}, 전일종가:{prev_close})',
+                              code=position.code)
+                position.state = PositionState.DISQUALIFIED
+                position.error_message = '유효하지 않은 가격'
+                return True
+            
+            # 갭률 계산 (시가 기준)
+            gap_rate = (open_price - prev_close) / prev_close * 100
+            
+            # 갭 조건 확인: 시가가 전일종가 대비 +2% ~ +5% 범위
+            gap_min = self.config.GAP_THRESHOLD_MIN
+            gap_max = self.config.GAP_THRESHOLD_MAX
+            
+            if gap_min <= gap_rate <= gap_max:
+                # 갭 조건 충족 - 계속 감시
+                position.current_price = price_data.get('current_price', open_price)
+                position.open_price = open_price  # 시가 저장
+                self._log_event('INFO', 'GAP_QUALIFIED', 
+                              f'{position.name}: 갭 조건 충족 (갭률: {gap_rate:.2f}%, 범위: {gap_min}%~{gap_max}%)',
+                              code=position.code,
+                              data={'gap_rate': gap_rate, 'open_price': open_price, 'prev_close': prev_close})
+                return False  # 통과
+            elif gap_rate < gap_min:
+                # 갭 부족 - 탈락
+                position.state = PositionState.DISQUALIFIED
+                position.error_message = f'갭 부족 ({gap_rate:.2f}% < {gap_min}%)'
+                self._log_event('INFO', 'GAP_DISQUALIFIED', 
+                              f'{position.name}: 갭 부족으로 탈락 (갭률: {gap_rate:.2f}% < {gap_min}%)',
+                              code=position.code,
+                              data={'gap_rate': gap_rate, 'open_price': open_price, 'prev_close': prev_close})
+                return True  # 탈락
+            else:
+                # 갭 초과 (+5% 초과) - 탈락 (과열)
+                position.state = PositionState.DISQUALIFIED
+                position.error_message = f'갭 과열 ({gap_rate:.2f}% > {gap_max}%)'
+                self._log_event('INFO', 'GAP_DISQUALIFIED', 
+                              f'{position.name}: 갭 과열로 탈락 (갭률: {gap_rate:.2f}% > {gap_max}%)',
+                              code=position.code,
+                              data={'gap_rate': gap_rate, 'open_price': open_price, 'prev_close': prev_close})
+                return True  # 탈락
+                
+        except Exception as e:
+            self._log_event('ERROR', 'GAP_CHECK_ERROR', 
+                          f'{position.name}: 갭 확인 오류 - {e}',
+                          code=position.code)
+            position.state = PositionState.DISQUALIFIED
+            position.error_message = f'갭 확인 오류: {e}'
+            return True
     
     # =============================
     # 유니버스 구축
@@ -907,21 +1053,28 @@ class AutoTradingEngine:
         """유니버스 구축에 사용할 날짜 반환
         
         규칙:
-        - 저녁 20:00 이후: 당일 데이터 사용 (다음 거래일용)
-        - 오전 08:00 이후: 전일 데이터 사용 (당일 거래용)
+        - 오후 4시~6시: 구축 불가 (None 반환)
+        - 오후 6시~23:59: 당일 데이터 사용 (내일용)
+        - 00:00~오후 4시: 전일 데이터 사용 (오늘용)
         """
         now = datetime.now()
         current_hour = now.hour
         today = now.date()
         
-        if current_hour >= 20:
-            # 저녁 8시 이후: 당일 데이터 (오늘이 거래일이면 오늘, 아니면 최근 거래일)
+        # 오후 4시~6시: 구축 불가
+        if 16 <= current_hour < 18:
+            self._log_event('WARNING', 'UNIVERSE_BLOCKED', 
+                          '유니버스 구축 불가 시간 (16:00-18:00)')
+            return None
+        
+        if current_hour >= 18:
+            # 저녁 6시 이후: 당일 데이터
             if is_trading_day(today):
                 return today
             else:
                 return get_prev_trading_day(today)
         else:
-            # 오전 8시 이후 (또는 그 외): 전일 데이터
+            # 오전 0시~오후 4시: 전일 데이터
             return get_prev_trading_day(today)
     
     def build_universe(self) -> List[UniverseStock]:
@@ -940,6 +1093,13 @@ class AutoTradingEngine:
         try:
             # 유니버스 대상 날짜 계산
             target_date = self._get_universe_target_date()
+            
+            # 4PM~6PM 사이면 구축 불가
+            if target_date is None:
+                self._log_event('WARNING', 'UNIVERSE_BLOCKED', 
+                              '유니버스 구축 불가 시간대 (16:00-18:00)')
+                return []
+            
             target_date_str = target_date.strftime('%Y-%m-%d')
             
             self._log_event('INFO', 'UNIVERSE_DATE', f'유니버스 기준일: {target_date_str}')
@@ -962,17 +1122,22 @@ class AutoTradingEngine:
                             name = row.get('name', '')
                             close = row.get('close', 0)
                             high = row.get('high', 0)
+                            volume = row.get('volume', 0)
+                            
+                            # 거래대금 계산 (억원): 종가 * 거래량 / 1억
+                            trading_value = (close * volume) / 100000000
                             
                             candidates.append({
                                 'code': code,
                                 'name': name,
                                 'prev_close': close,
                                 'prev_high': high,
-                                'change_rate': change_rate
+                                'change_rate': change_rate,
+                                'trading_value': trading_value
                             })
                     
                     self._log_event('INFO', 'UNIVERSE_CANDIDATES', 
-                                  f'상한가 종목 {len(candidates)}개 발견, 시총 조회 시작')
+                                  f'상한가 종목 {len(candidates)}개 발견, 필터링 시작')
                     
                 except Exception as e:
                     self._log_event('WARNING', 'UNIVERSE_LOCAL_ERROR', f'로컬 데이터 로드 실패: {e}')
@@ -1009,42 +1174,53 @@ class AutoTradingEngine:
                                     'name': name,
                                     'prev_close': close,
                                     'prev_high': high,
-                                    'change_rate': change_rate
+                                    'change_rate': change_rate,
+                                    'trading_value': 0  # pykrx에서는 별도 계산 필요
                                 })
                         except:
                             continue
                 except ImportError:
                     self._log_event('WARNING', 'UNIVERSE_FALLBACK', 'pykrx 미설치')
             
-            # 3단계: KIS API로 시가총액 조회 및 필터링
+            # 3단계: 시가총액 + 거래대금 필터링
             for cand in candidates:
                 code = cand['code']
                 name = cand['name']
+                trading_value = cand.get('trading_value', 0)
+                
+                # 거래대금 필터: 300억 이상
+                if trading_value < self.config.MIN_TRADING_VALUE:
+                    self._log_event('INFO', 'UNIVERSE_SKIP_TV', 
+                                  f'{name} 거래대금 미달 ({trading_value:.0f}억 < {self.config.MIN_TRADING_VALUE}억)',
+                                  code=code)
+                    continue
                 
                 # KIS API로 시총 조회
                 market_cap = self._get_market_cap(code)
                 time.sleep(0.1)  # API 호출 간격 (rate limit 방지)
                 
-                # 시총 필터: 500억 이상
-                if market_cap >= self.config.MIN_MARKET_CAP:
-                    universe.append(UniverseStock(
-                        code=code,
-                        name=name,
-                        prev_close=cand['prev_close'],
-                        prev_high=cand['prev_high'],
-                        change_rate=cand['change_rate'],
-                        market_cap=market_cap,
-                        added_date=self.state.today
-                    ))
-                    
-                    self._log_event('INFO', 'UNIVERSE_ADD', 
-                                  f'{name} 유니버스 추가 (시총 {market_cap:.0f}억)',
-                                  code=code,
-                                  data={'change_rate': round(cand['change_rate'], 2), 'market_cap': market_cap})
-                else:
-                    self._log_event('INFO', 'UNIVERSE_SKIP', 
+                # 시총 필터: 1,000억 이상
+                if market_cap < self.config.MIN_MARKET_CAP:
+                    self._log_event('INFO', 'UNIVERSE_SKIP_MC', 
                                   f'{name} 시총 미달 ({market_cap:.0f}억 < {self.config.MIN_MARKET_CAP}억)',
                                   code=code)
+                    continue
+                
+                # 모든 필터 통과
+                universe.append(UniverseStock(
+                    code=code,
+                    name=name,
+                    prev_close=cand['prev_close'],
+                    prev_high=cand['prev_high'],
+                    change_rate=cand['change_rate'],
+                    market_cap=market_cap,
+                    added_date=self.state.today
+                ))
+                
+                self._log_event('INFO', 'UNIVERSE_ADD', 
+                              f'{name} 유니버스 추가 (시총 {market_cap:.0f}억, 거래대금 {trading_value:.0f}억)',
+                              code=code,
+                              data={'change_rate': round(cand['change_rate'], 2), 'market_cap': market_cap, 'trading_value': trading_value})
             
             # 4단계: 시총 높은 순으로 정렬 (진입 우선순위)
             universe.sort(key=lambda x: x.market_cap, reverse=True)
@@ -1138,7 +1314,7 @@ class AutoTradingEngine:
     # =============================
     
     def check_entry_signal(self, position: Position) -> bool:
-        """진입 시그널 확인 (갭 ≥ +2%, 2회 확인, 급등 시 포기)"""
+        """진입 시그널 확인: 갭 +2%~+5% 후 전일종가(0%) 도달 시 매수"""
         try:
             price_data = self._get_current_price(position.code)
             if not price_data:
@@ -1148,44 +1324,46 @@ class AutoTradingEngine:
             open_price = price_data.get('open_price', 0)
             prev_close = position.prev_close
             
-            if prev_close <= 0 or open_price <= 0:
+            if prev_close <= 0 or current_price <= 0:
                 return False
-            
-            # 갭 계산 (시가 기준)
-            gap_rate = (open_price - prev_close) / prev_close * 100
             
             # 현재가 업데이트
             position.current_price = current_price
             
-            # 급등 체크: 현재가가 전일종가 대비 너무 올랐으면 진입 포기
-            current_rise_rate = (current_price - prev_close) / prev_close * 100
-            if current_rise_rate >= self.config.ENTRY_MAX_RISE_RATE:
-                self._log_event('WARNING', 'ENTRY_SKIP_SURGE', 
-                              f'급등으로 진입 포기 ({current_rise_rate:.1f}% > {self.config.ENTRY_MAX_RISE_RATE}%)',
-                              code=position.code,
-                              data={'current_rise_rate': current_rise_rate, 'current_price': current_price})
-                position.state = PositionState.SKIPPED
-                position.error_message = f'급등 진입 포기 ({current_rise_rate:.1f}%)'
-                return False
+            # KOSPI 시장 필터 체크
+            if self.config.USE_MARKET_FILTER:
+                if not self._check_market_filter():
+                    self._log_event('INFO', 'MARKET_FILTER_BLOCKED', 
+                                  f'KOSPI 5일선 하회로 진입 보류',
+                                  code=position.code)
+                    return False
             
-            # 갭 조건 확인
-            if gap_rate >= self.config.GAP_THRESHOLD:
-                position.gap_confirms += 1
-                self._log_event('INFO', 'GAP_CONFIRM', 
-                              f'갭 확인 {position.gap_confirms}/{self.config.GAP_CONFIRM_COUNT}',
-                              code=position.code,
-                              data={'gap_rate': gap_rate, 'open': open_price, 'prev_close': prev_close})
+            # 진입 조건: 현재가가 전일종가 이하로 내려왔을 때 매수
+            # (갭상승 후 눌림목에서 전일종가 지지 확인)
+            if self.config.ENTRY_AT_PREV_CLOSE:
+                # 전일종가 근처 또는 이하 도달 체크 (오차범위 0.3%)
+                tolerance = prev_close * 0.003  # 0.3% 허용
                 
-                if position.gap_confirms >= self.config.GAP_CONFIRM_COUNT:
-                    return True
-            else:
-                # 갭 미충족 시 카운트 리셋
-                if position.gap_confirms > 0:
-                    self._log_event('INFO', 'GAP_RESET', 
-                                  f'갭 미충족, 카운트 리셋',
+                if current_price <= prev_close + tolerance:
+                    position.gap_confirms += 1
+                    self._log_event('INFO', 'ENTRY_SIGNAL', 
+                                  f'전일종가 도달 확인 {position.gap_confirms}/{self.config.GAP_CONFIRM_COUNT}',
                                   code=position.code,
-                                  data={'gap_rate': gap_rate})
-                position.gap_confirms = 0
+                                  data={'current_price': current_price, 'prev_close': prev_close, 
+                                        'tolerance': tolerance})
+                    
+                    if position.gap_confirms >= self.config.GAP_CONFIRM_COUNT:
+                        self._log_event('INFO', 'ENTRY_CONFIRMED', 
+                                      f'진입 시그널 확정 - 전일종가({prev_close}) 도달',
+                                      code=position.code)
+                        return True
+                else:
+                    # 아직 전일종가까지 내려오지 않음
+                    if position.gap_confirms > 0:
+                        self._log_event('INFO', 'ENTRY_RESET', 
+                                      f'전일종가 미도달, 카운트 유지',
+                                      code=position.code,
+                                      data={'current_price': current_price, 'prev_close': prev_close})
             
             return False
         except Exception as e:
@@ -1194,7 +1372,7 @@ class AutoTradingEngine:
             return False
     
     def check_exit_signal(self, position: Position) -> Tuple[bool, str]:
-        """청산 시그널 확인 (TP/SL/EOD)
+        """청산 시그널 확인 (TP/전일종가SL/EOD)
         Returns: (should_exit, reason)
         """
         try:
@@ -1217,8 +1395,11 @@ class AutoTradingEngine:
             if pnl_rate >= self.config.TAKE_PROFIT_RATE:
                 return True, "TP"
             
-            # SL 체크 (-3%)
+            # SL 체크 (-4%)
             if pnl_rate <= self.config.STOP_LOSS_RATE:
+                self._log_event('INFO', 'SL_FIXED', 
+                              f'손절 - 손익률({pnl_rate:.2f}%) ≤ {self.config.STOP_LOSS_RATE}%',
+                              code=position.code)
                 return True, "SL"
             
             # EOD 체크
@@ -1239,7 +1420,7 @@ class AutoTradingEngine:
     # =============================
     
     def execute_entry(self, position: Position) -> bool:
-        """진입 주문 실행"""
+        """진입 주문 실행 (전일종가 지정가 또는 시가 지정가 주문)"""
         try:
             # 투자 금액 계산 (1/N 방식: 총자산 / 최대 포지션 수)
             position_amount = self.state.total_asset / self.config.MAX_POSITIONS
@@ -1253,16 +1434,30 @@ class AutoTradingEngine:
                 return False
             
             current_price = price_data.get('current_price', 0)
-            ask_price = price_data.get('ask_price', current_price)
+            open_price = price_data.get('open_price', 0)
             
             if current_price <= 0:
                 position.state = PositionState.SKIPPED
                 position.error_message = '유효하지 않은 가격'
                 return False
             
-            # 주문 가격: 공격 지정가 (Best Ask + N틱)
-            # 슬리피지 최소화를 위해 매도호가 기준으로 주문
-            order_price = ask_price + (self.config.ORDER_SLIPPAGE_TICKS * self._get_tick_size(current_price))
+            # 주문가 결정: 전일종가 지정가 > 시가 지정가 > 현재가 지정가
+            if self.config.USE_LIMIT_ORDER_AT_PREV_CLOSE and position.prev_close > 0:
+                # AI 예측 모드: 전일종가 지정가 주문
+                order_price = position.prev_close
+                self._log_event('INFO', 'ENTRY_PRICE', 
+                              f'전일종가 지정가 주문: {order_price}원',
+                              code=position.code)
+            elif self.config.USE_LIMIT_ORDER_AT_OPEN and open_price > 0:
+                # 시가 지정가 주문
+                order_price = open_price
+                self._log_event('INFO', 'ENTRY_PRICE', 
+                              f'시가 지정가 주문: {order_price}원',
+                              code=position.code)
+            else:
+                # 폴백: 현재가 기준 지정가
+                ask_price = price_data.get('ask_price', current_price)
+                order_price = ask_price + (self.config.ORDER_SLIPPAGE_TICKS * self._get_tick_size(current_price))
             
             # 수량 계산
             quantity = int(position_amount / order_price)
@@ -1285,8 +1480,9 @@ class AutoTradingEngine:
                 position.error_message = '최대 포지션 수 도달'
                 return False
             
-            # 주문 실행
+            # 주문 실행 (지정가 주문)
             position.state = PositionState.ENTRY_PENDING
+            position.limit_order_price = order_price  # 지정가 기록
             
             result = self._place_order(position.code, quantity, 'buy', order_price)
             
@@ -1302,11 +1498,11 @@ class AutoTradingEngine:
             
             position.order_id = result.get('order_no', '')
             position.pending_quantity = quantity
-            position.order_time = datetime.now().isoformat()  # 주문 시간 기록 (타임아웃 체크용)
+            position.order_time = datetime.now().isoformat()  # 주문 시간 기록 (9:30 취소 체크용)
             
-            self._log_event('INFO', 'ENTRY_ORDER', f'매수 주문 접수',
+            self._log_event('INFO', 'ENTRY_ORDER', f'시가 지정가 매수 주문 접수',
                           code=position.code,
-                          data={'order_no': position.order_id, 'qty': quantity, 'price': order_price})
+                          data={'order_no': position.order_id, 'qty': quantity, 'price': order_price, 'type': 'limit_at_open'})
             
             return True
         except Exception as e:
@@ -1596,14 +1792,41 @@ class AutoTradingEngine:
         time.sleep(5)  # 준비 단계는 느리게
     
     def _phase_entry_window(self):
-        """진입 구간 (09:00~09:03)"""
+        """진입 구간 (09:00~09:30)"""
+        now = datetime.now()
+        cancel_time = datetime.strptime(f"{now.strftime('%Y-%m-%d')} {self.config.ENTRY_CANCEL_TIME}", 
+                                        '%Y-%m-%d %H:%M')
+        
         for code, position in self.state.positions.items():
             if position.state == PositionState.WATCHING:
-                # 갭 시그널 확인
+                # 먼저 갭 조건 확인하여 탈락 여부 판정
+                disqualified = self._check_gap_disqualification(position)
+                if disqualified:
+                    continue  # 탈락 종목은 건너뜀
+                
+                # 갭 시그널 확인 (갭 조건 충족 종목만)
                 if self.check_entry_signal(position):
                     self.execute_entry(position)
             
             elif position.state == PositionState.ENTRY_PENDING:
+                # 9:30 미체결 취소 체크 (AI 예측 모드)
+                if now >= cancel_time and position.order_time:
+                    # 취소 시간 도달 - 미체결 주문 취소
+                    cancel_success = self._cancel_order(
+                        position.order_id, 
+                        position.code, 
+                        position.pending_quantity
+                    )
+                    if cancel_success:
+                        position.state = PositionState.SKIPPED
+                        position.error_message = f'{self.config.ENTRY_CANCEL_TIME} 미체결 취소'
+                        self._log_event('INFO', 'ENTRY_CANCEL_TIME', 
+                                      f'{position.name}({position.code}): {self.config.ENTRY_CANCEL_TIME} 미체결로 주문 취소')
+                    else:
+                        # 취소 실패 - 체결 확인 계속
+                        self.confirm_order(position)
+                    continue
+                
                 # 미체결 타임아웃 체크
                 if self._check_pending_timeout(position):
                     # 타임아웃 시 주문 취소
@@ -1975,3 +2198,106 @@ def get_auto_trading_mode() -> dict:
         "label": "모의투자" if _current_mode == "mock" else "실전투자",
         "is_mock": _current_mode == "mock"
     }
+
+
+def build_universe_for_date(target_date: str) -> dict:
+    """
+    특정 날짜의 데이터로 유니버스 구축 (스케줄러에서 호출)
+    
+    Args:
+        target_date: 유니버스 기준 날짜 (YYYY-MM-DD 형식)
+        
+    Returns:
+        {"success": True/False, "count": N, "error": "..."}
+    """
+    from pathlib import Path
+    import pyarrow.parquet as pq
+    
+    try:
+        # 현재 엔진 가져오기
+        engine = get_auto_trading_engine()
+        
+        # 대상 날짜 데이터 존재 확인
+        bars_dir = Path("data/krx/bars") / f"date={target_date}"
+        if not bars_dir.exists():
+            return {"success": False, "error": f"Data not found for {target_date}"}
+        
+        # 데이터 로드
+        df = pq.read_table(bars_dir).to_pandas()
+        
+        if df.empty:
+            return {"success": False, "error": f"Empty data for {target_date}"}
+        
+        # 상한가 종목 필터링
+        candidates = []
+        for _, row in df.iterrows():
+            change_rate = row.get('change', 0) * 100
+            
+            if change_rate >= engine.config.UPPER_LIMIT_RATE:
+                candidates.append({
+                    'code': row.get('code', ''),
+                    'name': row.get('name', ''),
+                    'prev_close': row.get('close', 0),
+                    'prev_high': row.get('high', 0),
+                    'change_rate': change_rate
+                })
+        
+        # 유니버스 구축 (MIN_MARKET_CAP=0이면 시총 조건 없음)
+        universe = []
+        for cand in candidates:
+            market_cap = engine._get_market_cap(cand['code'])
+            time.sleep(0.1)
+            
+            # MIN_MARKET_CAP=0이면 모든 종목 통과
+            if market_cap >= engine.config.MIN_MARKET_CAP:
+                universe.append(UniverseStock(
+                    code=cand['code'],
+                    name=cand['name'],
+                    prev_close=cand['prev_close'],
+                    prev_high=cand['prev_high'],
+                    change_rate=cand['change_rate'],
+                    market_cap=market_cap,
+                    added_date=target_date
+                ))
+        
+        # 시총 높은 순 정렬
+        universe.sort(key=lambda x: x.market_cap, reverse=True)
+        
+        # 기존 유니버스 및 positions 클리어 (데이터 섞임 방지)
+        engine.state.universe = []
+        # ENTERED, EXIT_PENDING 상태가 아닌 포지션만 제거
+        from auto_trading_strategy1 import PositionState
+        positions_to_keep = {k: v for k, v in engine.state.positions.items() 
+                            if v.state in (PositionState.ENTERED, PositionState.EXIT_PENDING)}
+        engine.state.positions = positions_to_keep
+        
+        # 새 유니버스 저장
+        engine.state.universe = universe
+        
+        # 새 유니버스 종목을 positions에 추가
+        for stock in universe:
+            if stock.code not in engine.state.positions:
+                engine.state.positions[stock.code] = Position(
+                    code=stock.code,
+                    name=stock.name,
+                    state=PositionState.WATCHING,
+                    prev_close=stock.prev_close,
+                    prev_high=stock.prev_high,
+                    market_cap=stock.market_cap
+                )
+        
+        # DB에 저장
+        engine._save_universe_to_db(universe, target_date)
+        
+        engine._log_event('INFO', 'UNIVERSE_BUILD_API', 
+                         f'유니버스 구축 완료: {len(universe)}종목 (기준일: {target_date})')
+        
+        return {
+            "success": True, 
+            "count": len(universe), 
+            "target_date": target_date,
+            "stocks": [{"code": s.code, "name": s.name, "market_cap": s.market_cap} for s in universe[:10]]
+        }
+        
+    except Exception as e:
+        return {"success": False, "error": str(e)}
