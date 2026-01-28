@@ -40,6 +40,7 @@ _kis_api_cache = {}
 # =============================
 _scheduler_state = {
     "eod_done_today": False,       # 오늘 16시 EOD 실행 여부
+    "intraday_done_today": False,  # 오늘 인트라데이 실행 여부
     "universe_done_today": False,  # 오늘 20시 유니버스 자동 구축 실행 여부
     "inference_done_today": False, # Inference 실행 여부
     "auto_start_done_today": False, # 오늘 자동매매 자동시작 실행 여부
@@ -215,6 +216,27 @@ def get_recent_business_day() -> str:
         today = today - timedelta(days=2)
     return today.strftime("%Y%m%d")
 
+
+def get_prev_business_day(date_yyyymmdd: str) -> str:
+    """Get previous business day from local bars partitions."""
+    try:
+        date_obj = datetime.strptime(date_yyyymmdd, "%Y%m%d").date()
+        # Find all available partition dates
+        if not os.path.isdir(KRX_BARS_DIR):
+            return ""
+        available_dates = []
+        for name in os.listdir(KRX_BARS_DIR):
+            d = _parse_partition_date(name)
+            if d and d < date_obj:
+                available_dates.append(d)
+        if not available_dates:
+            return ""
+        # Return most recent date before current
+        prev_date = max(available_dates)
+        return prev_date.strftime("%Y%m%d")
+    except Exception:
+        return ""
+
 # 데이터베이스 모델 정의
 class Group(db.Model):
     id = db.Column(db.String(50), primary_key=True)
@@ -302,6 +324,20 @@ class AutoTradingSettings(db.Model):
     value = db.Column(db.Text, nullable=False)
     updated_at = db.Column(db.String(50), nullable=False)
 
+
+# 자동매매 대상 종목 모델 (서버 저장 - 모든 디바이스에서 공유)
+class AutoTradingTargetStock(db.Model):
+    id = db.Column(db.Integer, primary_key=True, autoincrement=True)
+    code = db.Column(db.String(10), unique=True, nullable=False)  # 종목코드
+    name = db.Column(db.String(100), nullable=False)  # 종목명
+    base_price = db.Column(db.Float, nullable=True)  # 기준가
+    current_price = db.Column(db.Float, nullable=True)  # 현재가
+    market_cap = db.Column(db.Float, nullable=True)  # 시가총액
+    source = db.Column(db.String(50), nullable=True)  # 출처 (ai_model1, ai_model2, ai_both, manual)
+    probability = db.Column(db.Float, nullable=True)  # 확률
+    model_name = db.Column(db.String(50), nullable=True)  # 모델명
+    added_date = db.Column(db.String(50), nullable=False)  # 추가일시
+    
 
 def load_fundamentals_json() -> dict:
     """Load public/stock_fundamentals.json as dict; returns {} if missing."""
@@ -1053,24 +1089,41 @@ def get_recommendations():
         
         # 현재가 조회를 위한 기초 데이터 로드 (로컬 바) - 항상 시도
         local_bars = {}
+        prev_bars = {}
         try:
             latest_date = get_recent_business_day()
+            prev_date = get_prev_business_day(latest_date)
             local_bars = get_local_bars_for_codes(latest_date, [r.code for r in recs])
+            if prev_date:
+                prev_bars = get_local_bars_for_codes(prev_date, [r.code for r in recs])
         except Exception as e:
             print(f"[WARN] Failed to load local bars: {e}")
         
-        # KIS API 사용 가능 여부 사전 체크 (첫 번째 종목으로 테스트)
-        if not skip_realtime and recs:
+        # 장 운영시간 체크 (09:00~15:30만 실시간 조회)
+        now = datetime.now()
+        is_market_hours = (now.weekday() < 5 and 
+                          ((now.hour == 9 and now.minute >= 0) or 
+                           (9 < now.hour < 15) or 
+                           (now.hour == 15 and now.minute <= 30)))
+        
+        # 장 외 시간에는 실시간 조회 스킵 (로컬 데이터만 사용)
+        if not is_market_hours:
+            skip_realtime = True
+            kis_api_available = False
+            kis_error_message = "Off-market hours - using local data"
+        
+        # KIS API 사용 가능 여부 사전 체크 (첫 번째 종목으로 테스트) - 장중에만
+        if not skip_realtime and recs and is_market_hours:
             try:
                 test_code = recs[0].code.zfill(6)
                 test_result = get_kis_realtime_price(test_code)
                 if test_result is None or 'error' in str(test_result).lower():
                     kis_api_available = False
-                    kis_error_message = "KIS API 연결 실패 - 실시간 가격 조회 불가"
+                    kis_error_message = "KIS API connection failed"
                     print(f"[WARN] KIS API unavailable: {test_result}")
             except Exception as e:
                 kis_api_available = False
-                kis_error_message = f"KIS API 오류: {str(e)[:100]}"
+                kis_error_message = f"KIS API error: {str(e)[:50]}"
                 print(f"[WARN] KIS API check failed: {e}")
         
         for rec in recs:
@@ -1086,15 +1139,21 @@ def get_recommendations():
             current_change = 0
             price_source = 'base'  # 가격 소스: 'base', 'local', 'realtime'
             
+            # 로컬 데이터에서 등락률 계산 (전일 종가 대비)
             if code in local_bars and local_bars[code].get('close', 0) > 0:
                 price_source = 'local'
+                # 전일 종가가 있으면 등락률 계산
+                if code in prev_bars and prev_bars[code].get('close', 0) > 0:
+                    prev_close = prev_bars[code].get('close', 0)
+                    current_change = ((current_price - prev_close) / prev_close) * 100
             
             # KIS API가 사용 가능하고 skip_realtime이 아닐 때만 실시간 조회
             if kis_api_available and not skip_realtime:
                 try:
                     now_ts = time.time()
                     cached = _kis_api_cache.get(f"price_{code}")
-                    if cached and (now_ts - cached['ts'] < 60):
+                    # 캐시 유효시간 5분 (300초)
+                    if cached and (now_ts - cached['ts'] < 300):
                         current_price = cached['price']
                         current_change = cached.get('changePercent', 0)
                         price_source = 'realtime'
@@ -1116,6 +1175,14 @@ def get_recommendations():
             profit_rate = 0
             if rec.base_price > 0:
                 profit_rate = (current_price - rec.base_price) / rec.base_price * 100
+            
+            # 전 거래일 대비 거래량 비율 계산
+            volume_ratio = 0
+            if code in local_bars and code in prev_bars:
+                current_volume = local_bars[code].get('volume', 0) or 0
+                prev_volume = prev_bars[code].get('volume', 0) or 0
+                if prev_volume > 0:
+                    volume_ratio = (current_volume / prev_volume) * 100
                 
             results.append({
                 'id': rec.id,
@@ -1127,6 +1194,7 @@ def get_recommendations():
                 'base_price': rec.base_price,
                 'current_price': current_price,
                 'current_change': current_change,
+                'volume_ratio': round(volume_ratio, 1),
                 'probability': rec.probability,
                 'expected_return': rec.expected_return,
                 'market_cap': rec.market_cap,
@@ -1319,6 +1387,7 @@ def get_groups():
 
         # Preload local+json data once per request (fast path)
         business_day = get_recent_business_day()
+        prev_business_day = get_prev_business_day(business_day)  # 전 거래일
         fundamentals = load_fundamentals_json()
         tickers = load_local_tickers()
 
@@ -1331,7 +1400,7 @@ def get_groups():
                     all_stock_ids.append(s.id)
 
         local_bars_map = get_local_bars_for_codes(business_day, all_codes) if all_codes else {}
-        
+        prev_bars_map = get_local_bars_for_codes(prev_business_day, all_codes) if all_codes and prev_business_day else {}
 
         # 모든 거래 내역 한꺼번에 조회 (성능 최적화)
         all_trades = Trade.query.filter(Trade.stock_id.in_(all_stock_ids)).all() if all_stock_ids else []
@@ -1358,6 +1427,11 @@ def get_groups():
                 current_price = merged.get('currentPrice', stock.price) or 0
                 volume = merged.get('volume', stock.volume) or 0
                 market_cap = merged.get('marketCap', stock.market_cap) or 0
+
+                # 전 거래일 대비 거래량 비율 계산
+                prev_bar = prev_bars_map.get(code, {})
+                prev_volume = prev_bar.get('volume', 0) or 0
+                volume_ratio = (volume / prev_volume * 100) if prev_volume > 0 else 0
 
                 # 수익률 계산 (매수/매도 기록 기반)
                 trades = trades_by_stock.get(stock.id, [])
@@ -1469,6 +1543,7 @@ def get_groups():
                     'tradingVolume': str(volume),
                     'transactionAmount': str(merged.get('transactionAmount', merged.get('value', '0')) or '0'),
                     'foreignOwnership': foreign_val,
+                    'volumeRatio': round(volume_ratio, 1),  # 전 거래일 대비 거래량 비율 (%)
                     'quarterlyMargins': q_margins,
                     'memos': [{'id': m['id'], 'date': m['created_at'], 'content': m['content']} for m in memos],
                     'addedAt': stock.added_at,
@@ -2722,6 +2797,7 @@ def reset_scheduler_state_if_new_day():
     with _scheduler_lock:
         if _scheduler_state["last_check_date"] != today:
             _scheduler_state["eod_done_today"] = False
+            _scheduler_state["intraday_done_today"] = False
             _scheduler_state["universe_done_today"] = False
             _scheduler_state["inference_done_today"] = False
             _scheduler_state["auto_start_done_today"] = False
@@ -2833,6 +2909,7 @@ def run_crawl_eod(max_retries: int = 3):
                     _scheduler_state["last_crawl_mode"] = "eod (auto)"
                     _scheduler_state["last_crawl_date_range"] = target_date
                     _scheduler_state["last_crawl_duration"] = duration_seconds
+                    _scheduler_state["crawling_status"] = None  # 크롤링 완료 시 상태 리셋
                 return True
             else:
                 error_msg = result.stderr[:500] if result.stderr else "Unknown error"
@@ -3191,8 +3268,8 @@ def scheduler_tick():
     if crawling:
         return
     
-    # 08:35~08:50: 자동매매 자동 시작 체크
-    if hour == 8 and 35 <= minute <= 50 and not auto_start_done:
+    # 08:30~08:50: 자동매매 자동 시작 체크 (사용자 요청: 8:30분 준비)
+    if hour == 8 and 30 <= minute <= 50 and not auto_start_done:
         try:
             # DB에서 auto_start_mode 설정 확인
             auto_start_setting = AutoTradingSettings.query.filter_by(key='auto_start_mode').first()
@@ -4383,6 +4460,167 @@ def api_auto_trading_settings_set():
     except Exception as e:
         print(f"자동매매 설정 저장 오류: {e}")
         db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+# =============================
+# 자동매매 대상 종목 API (서버 저장 - 모든 디바이스에서 공유)
+# =============================
+
+@app.route('/api/auto-trading/target-stocks', methods=['GET'])
+def api_get_target_stocks():
+    """자동매매 대상 종목 조회"""
+    try:
+        stocks = AutoTradingTargetStock.query.all()
+        result = []
+        for s in stocks:
+            result.append({
+                'code': s.code,
+                'name': s.name,
+                'basePrice': s.base_price,
+                'currentPrice': s.current_price,
+                'marketCap': s.market_cap,
+                'source': s.source,
+                'probability': s.probability,
+                'modelName': s.model_name,
+                'addedDate': s.added_date,
+            })
+        return jsonify({"success": True, "stocks": result})
+    except Exception as e:
+        print(f"자동매매 대상 종목 조회 오류: {e}")
+        return jsonify({"success": False, "error": str(e), "stocks": []}), 500
+
+
+@app.route('/api/auto-trading/target-stocks', methods=['POST'])
+def api_add_target_stocks():
+    """자동매매 대상 종목 추가"""
+    try:
+        data = request.get_json()
+        stocks = data.get('stocks', [])
+        
+        added_count = 0
+        for stock in stocks:
+            code = stock.get('code')
+            if not code:
+                continue
+            
+            # 이미 존재하는지 확인
+            existing = AutoTradingTargetStock.query.filter_by(code=code).first()
+            if existing:
+                # 이미 있으면 업데이트
+                existing.name = stock.get('name', existing.name)
+                existing.base_price = stock.get('basePrice', existing.base_price)
+                existing.current_price = stock.get('currentPrice', existing.current_price)
+                existing.market_cap = stock.get('marketCap', existing.market_cap)
+                existing.source = stock.get('source', existing.source)
+                existing.probability = stock.get('probability', existing.probability)
+                existing.model_name = stock.get('modelName', existing.model_name)
+            else:
+                # 새로 추가
+                new_stock = AutoTradingTargetStock(
+                    code=code,
+                    name=stock.get('name', ''),
+                    base_price=stock.get('basePrice'),
+                    current_price=stock.get('currentPrice'),
+                    market_cap=stock.get('marketCap'),
+                    source=stock.get('source'),
+                    probability=stock.get('probability'),
+                    model_name=stock.get('modelName'),
+                    added_date=stock.get('addedDate', datetime.now().isoformat()),
+                )
+                db.session.add(new_stock)
+                added_count += 1
+        
+        db.session.commit()
+        return jsonify({"success": True, "added": added_count})
+    except Exception as e:
+        print(f"자동매매 대상 종목 추가 오류: {e}")
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/target-stocks', methods=['DELETE'])
+def api_delete_target_stocks():
+    """자동매매 대상 종목 삭제"""
+    try:
+        data = request.get_json()
+        codes = data.get('codes', [])
+        
+        if not codes:
+            return jsonify({"success": False, "error": "codes required"}), 400
+        
+        deleted_count = 0
+        for code in codes:
+            stock = AutoTradingTargetStock.query.filter_by(code=code).first()
+            if stock:
+                db.session.delete(stock)
+                deleted_count += 1
+        
+        db.session.commit()
+        return jsonify({"success": True, "deleted": deleted_count})
+    except Exception as e:
+        print(f"자동매매 대상 종목 삭제 오류: {e}")
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/target-stocks/clear', methods=['DELETE'])
+def api_clear_target_stocks():
+    """자동매매 대상 종목 전체 삭제"""
+    try:
+        deleted_count = AutoTradingTargetStock.query.delete()
+        db.session.commit()
+        return jsonify({"success": True, "deleted": deleted_count})
+    except Exception as e:
+        print(f"자동매매 대상 종목 전체 삭제 오류: {e}")
+        db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/positions/remove', methods=['POST'])
+def api_auto_trading_remove_positions():
+    """선택한 종목들을 포지션 목록에서 제거"""
+    try:
+        data = request.get_json()
+        codes = data.get('codes', [])
+        if not codes:
+            return jsonify({"success": False, "error": "codes required"}), 400
+        
+        engine = get_auto_trading_engine()
+        removed_count = 0
+        for code in codes:
+            if code in engine.state.positions:
+                pos = engine.state.positions[code]
+                # 보유 중(ENTERED) 또는 매수 대기(ENTRY_PENDING)만 삭제 불가
+                # EXIT_PENDING은 오류로 인해 실제로는 청산 완료된 경우가 있으므로 삭제 허용
+                if pos.state not in ['ENTERED', 'ENTRY_PENDING']:
+                    del engine.state.positions[code]
+                    removed_count += 1
+        
+        return jsonify({"success": True, "removed": removed_count})
+    except Exception as e:
+        print(f"포지션 삭제 오류: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/positions/clear', methods=['POST'])
+def api_auto_trading_clear_positions():
+    """보유 중이 아닌 모든 종목을 포지션 목록에서 제거"""
+    try:
+        engine = get_auto_trading_engine()
+        to_remove = []
+        for code, pos in engine.state.positions.items():
+            # 보유 중(ENTERED) 또는 매수 대기(ENTRY_PENDING)만 삭제 불가
+            # EXIT_PENDING은 오류로 인해 실제로는 청산 완료된 경우가 있으므로 삭제 허용
+            if pos.state not in ['ENTERED', 'ENTRY_PENDING']:
+                to_remove.append(code)
+        
+        for code in to_remove:
+            del engine.state.positions[code]
+        
+        return jsonify({"success": True, "removed": len(to_remove)})
+    except Exception as e:
+        print(f"포지션 전체 삭제 오류: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

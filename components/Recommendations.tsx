@@ -32,21 +32,24 @@ import {
   CheckSquare,
   Square,
   DollarSign,
-  Percent
+  Percent,
+  PlusCircle,
+  Bot
 } from 'lucide-react';
-import { RecommendedStock } from '../types';
+import { RecommendedStock, AutoTradingStock } from '../types';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
 
 interface RecommendationsProps {
   onStockClick: (stock: RecommendedStock) => void;
+  onAddToAutoTrading?: (stocks: AutoTradingStock[]) => void;
 }
 
-type SortKey = 'probability' | 'expected_return' | 'name' | 'current_price';
+type SortKey = 'probability' | 'expected_return' | 'name' | 'current_price' | 'model_name';
 type SortDirection = 'asc' | 'desc';
 type FilterTag = 'filter2';
-type ModelName = 'model1' | 'model5';
+type ModelName = 'model1' | 'model5' | 'both';  // 'both' 추가
 
 interface SchedulerStatus {
   eod_done_today: boolean;
@@ -93,7 +96,7 @@ const isMarketHours = (): boolean => {
 };
 
 // AI Thinking Animation Component
-const AIThinkingLoader: React.FC = () => (
+const AIThinkingLoader: React.FC<{ modelName?: string }> = ({ modelName }) => (
   <div className="flex flex-col items-center justify-center py-20 animate-in fade-in duration-700">
     <div className="relative w-24 h-24 mb-8">
       <div className="absolute inset-0 border-4 border-point-cyan/20 rounded-full animate-[spin_3s_linear_infinite]"></div>
@@ -102,11 +105,23 @@ const AIThinkingLoader: React.FC = () => (
         <BrainCircuit className="w-8 h-8 text-point-cyan animate-pulse" />
       </div>
     </div>
-    <h3 className="text-xl font-black text-white mb-2 tracking-tight">AI Agent가 시장을 분석 중입니다</h3>
+    <h3 className="text-xl font-black text-white mb-2 tracking-tight">
+      {modelName === 'both' ? 'AI 모델1 + 모델2 동시 분석 중' : 'AI Agent가 시장을 분석 중입니다'}
+    </h3>
     <p className="text-slate-500 font-medium text-center max-w-md leading-relaxed">
-      기술적 지표, 수급 데이터, 재무제표를 종합하여<br/>
-      <span className="text-point-cyan font-bold">필터2(상승 확률 70% 이상 + 추가 리스크컷)</span>
-      를 적용하여 추천 종목을 발굴하고 있습니다.
+      {modelName === 'both' ? (
+        <>
+          <span className="text-violet-400 font-bold">모델1(7-class)</span>과{' '}
+          <span className="text-emerald-400 font-bold">모델2(LightGBM)</span>를 동시에 실행하여<br/>
+          종합적인 추천 종목을 발굴하고 있습니다.
+        </>
+      ) : (
+        <>
+          기술적 지표, 수급 데이터, 재무제표를 종합하여<br/>
+          <span className="text-point-cyan font-bold">필터2(상승 확률 70% 이상 + 추가 리스크컷)</span>
+          를 적용하여 추천 종목을 발굴하고 있습니다.
+        </>
+      )}
     </p>
   </div>
 );
@@ -725,13 +740,13 @@ const saveBoughtStocks = (stocks: Record<string, BoughtStockInfo>) => {
   localStorage.setItem(BOUGHT_STOCKS_KEY, JSON.stringify(stocks));
 };
 
-export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }) => {
+export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick, onAddToAutoTrading }) => {
   const [recommendationsByFilter, setRecommendationsByFilter] = useState<Record<FilterTag, RecommendedStock[]>>({
     filter2: []
   });
   const [isLoading, setIsLoading] = useState(true);
   const [predictingFilter, setPredictingFilter] = useState<FilterTag | null>(null);
-  const [modelName, setModelName] = useState<ModelName>('model5');
+  const [modelName, setModelName] = useState<ModelName>('both');  // 기본값: both (동시 실행)
   const [errorByFilter, setErrorByFilter] = useState<Record<FilterTag, string | null>>({
     filter2: null
   });
@@ -781,6 +796,37 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   const [allocationPercent, setAllocationPercent] = useState<number>(80); // 총자산 중 할당 비율 (%)
   const [isStartingAutoTrade, setIsStartingAutoTrade] = useState(false);
   const [autoTradeResult, setAutoTradeResult] = useState<{ success: boolean; message: string } | null>(null);
+  
+  // 자동매매 대상 종목 (서버에서 로드)
+  const [autoTradingCodes, setAutoTradingCodes] = useState<Set<string>>(new Set());
+  
+  // 서버에서 자동매매 종목 목록 로드
+  const loadAutoTradingCodesFromServer = useCallback(async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/target-stocks`);
+      if (response.ok) {
+        const data = await response.json();
+        setAutoTradingCodes(new Set(data.stocks.map((s: any) => s.code)));
+      } else {
+        setAutoTradingCodes(new Set());
+      }
+    } catch {
+      setAutoTradingCodes(new Set());
+    }
+  }, []);
+  
+  // 초기 로드 및 주기적 새로고침
+  useEffect(() => {
+    loadAutoTradingCodesFromServer();
+    
+    // 페이지 포커스 시 다시 로드 (다른 탭에서 이동 후 돌아올 때)
+    const handleFocus = () => loadAutoTradingCodesFromServer();
+    window.addEventListener('focus', handleFocus);
+    
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+    };
+  }, []);
   
   // Refs for visibility tracking
   const stockRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -856,20 +902,46 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       setPredictingFilter(filterTag);
       setErrorByFilter(prev => ({ ...prev, [filterTag]: null }));
       try {
-        const response = await fetch(`${API_BASE_URL}/recommendations/predict?filter=${filterTag}&model=${modelName}`, {
-          method: 'POST'
-        });
-        if (!response.ok) {
-          let errData: any = null;
-          try {
-            errData = await response.json();
-          } catch {
-            // ignore
+        // 'both' 모드일 경우 두 모델 동시 실행
+        if (modelName === 'both') {
+          // 두 모델 병렬 실행
+          const [res1, res2] = await Promise.allSettled([
+            fetch(`${API_BASE_URL}/recommendations/predict?filter=${filterTag}&model=model1`, { method: 'POST' }),
+            fetch(`${API_BASE_URL}/recommendations/predict?filter=${filterTag}&model=model5`, { method: 'POST' })
+          ]);
+          
+          // 에러 체크
+          const errors: string[] = [];
+          if (res1.status === 'rejected' || (res1.status === 'fulfilled' && !res1.value.ok)) {
+            errors.push('모델1 예측 실패');
           }
-          const baseMsg = errData?.error || 'Prediction failed';
-          const backendPython = errData?.backend_python ? `\n\nbackend_python: ${errData.backend_python}` : '';
-          const howToFix = Array.isArray(errData?.how_to_fix) ? `\n\nHow to fix:\n- ${errData.how_to_fix.join('\n- ')}` : '';
-          throw new Error(`${baseMsg}${backendPython}${howToFix}`);
+          if (res2.status === 'rejected' || (res2.status === 'fulfilled' && !res2.value.ok)) {
+            errors.push('모델2 예측 실패');
+          }
+          
+          if (errors.length === 2) {
+            throw new Error('모델1, 모델2 모두 예측에 실패했습니다.');
+          } else if (errors.length === 1) {
+            console.warn(errors[0]);
+            // 하나라도 성공하면 계속 진행
+          }
+        } else {
+          // 단일 모델 실행
+          const response = await fetch(`${API_BASE_URL}/recommendations/predict?filter=${filterTag}&model=${modelName}`, {
+            method: 'POST'
+          });
+          if (!response.ok) {
+            let errData: any = null;
+            try {
+              errData = await response.json();
+            } catch {
+              // ignore
+            }
+            const baseMsg = errData?.error || 'Prediction failed';
+            const backendPython = errData?.backend_python ? `\n\nbackend_python: ${errData.backend_python}` : '';
+            const howToFix = Array.isArray(errData?.how_to_fix) ? `\n\nHow to fix:\n- ${errData.how_to_fix.join('\n- ')}` : '';
+            throw new Error(`${baseMsg}${backendPython}${howToFix}`);
+          }
         }
         await fetchRecommendations(filterTag, false);
       } catch (err: any) {
@@ -881,20 +953,69 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       return;
     }
 
-    // GET 조회
+    // GET 조회 - 'both' 모드일 경우 두 모델 결과 병합
     try {
-      const response = await fetch(`${API_BASE_URL}/recommendations?filter=${filterTag}&model=${modelName}`);
-      if (response.ok) {
-        // KIS API 상태 헤더 읽기
-        const kisAvailable = response.headers.get('X-KIS-Available') !== 'false';
-        const kisError = response.headers.get('X-KIS-Error');
+      if (modelName === 'both') {
+        const [res1, res2] = await Promise.all([
+          fetch(`${API_BASE_URL}/recommendations?filter=${filterTag}&model=model1`),
+          fetch(`${API_BASE_URL}/recommendations?filter=${filterTag}&model=model5`)
+        ]);
+        
+        // KIS API 상태 헤더 읽기 (첫 번째 응답에서)
+        const kisAvailable = res1.headers.get('X-KIS-Available') !== 'false';
+        const kisError = res1.headers.get('X-KIS-Error');
         setKisApiStatus({ available: kisAvailable, error: kisError });
         
-        const data = await response.json();
-        const processed = data.map((item: any) => ({
-          ...item,
-          close: item.base_price || item.close,
-        }));
+        let combined: RecommendedStock[] = [];
+        
+        if (res1.ok) {
+          const data1 = await res1.json();
+          combined = [...combined, ...data1.map((item: any) => ({
+            ...item,
+            close: item.base_price || item.close,
+            model_name: 'model1',
+          }))];
+        }
+        
+        if (res2.ok) {
+          const data2 = await res2.json();
+          combined = [...combined, ...data2.map((item: any) => ({
+            ...item,
+            close: item.base_price || item.close,
+            model_name: 'model5',
+          }))];
+        }
+        
+        // 중복 종목 병합 (같은 날짜, 같은 종목코드는 M1+M2로 표시)
+        const uniqueMap = new Map<string, RecommendedStock>();
+        combined.forEach(stock => {
+          const key = `${stock.date}_${stock.code}`;  // 날짜+종목코드로만 키 생성
+          if (uniqueMap.has(key)) {
+            // 이미 있는 종목이면 모델명 병합
+            const existing = uniqueMap.get(key)!;
+            const existingModels = existing.model_name || '';
+            const newModel = stock.model_name || '';
+            // 이미 병합된 경우 중복 추가 방지
+            if (!existingModels.includes(newModel)) {
+              existing.model_name = existingModels.includes('model1') && newModel === 'model5' 
+                ? 'model1+model5' 
+                : newModel.includes('model1') && existingModels === 'model5'
+                ? 'model1+model5'
+                : existingModels + '+' + newModel;
+            }
+            // 확률과 기대수익률은 더 높은 값으로
+            if (stock.probability > (existing.probability || 0)) {
+              existing.probability = stock.probability;
+            }
+            if (stock.expected_return > (existing.expected_return || 0)) {
+              existing.expected_return = stock.expected_return;
+            }
+          } else {
+            uniqueMap.set(key, { ...stock });
+          }
+        });
+        
+        const processed = Array.from(uniqueMap.values());
         setRecommendationsByFilter(prev => ({ ...prev, [filterTag]: processed }));
         
         // 오늘 날짜는 기본 펼침
@@ -904,8 +1025,31 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
           return newSet;
         });
       } else {
-        const errData = await response.json();
-        setErrorByFilter(prev => ({ ...prev, [filterTag]: errData.error || 'Failed to fetch recommendations' }));
+        const response = await fetch(`${API_BASE_URL}/recommendations?filter=${filterTag}&model=${modelName}`);
+        if (response.ok) {
+          // KIS API 상태 헤더 읽기
+          const kisAvailable = response.headers.get('X-KIS-Available') !== 'false';
+          const kisError = response.headers.get('X-KIS-Error');
+          setKisApiStatus({ available: kisAvailable, error: kisError });
+          
+          const data = await response.json();
+          const processed = data.map((item: any) => ({
+            ...item,
+            close: item.base_price || item.close,
+            model_name: modelName,
+          }));
+          setRecommendationsByFilter(prev => ({ ...prev, [filterTag]: processed }));
+          
+          // 오늘 날짜는 기본 펼침
+          setExpandedDates(prev => {
+            const newSet = new Set(prev);
+            newSet.add(today);
+            return newSet;
+          });
+        } else {
+          const errData = await response.json();
+          setErrorByFilter(prev => ({ ...prev, [filterTag]: errData.error || 'Failed to fetch recommendations' }));
+        }
       }
     } catch (err) {
       setErrorByFilter(prev => ({ ...prev, [filterTag]: 'Connection to backend failed' }));
@@ -944,8 +1088,17 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
     }
   }, []);
 
-  // 초기 로드
+  // 초기 로드 - 데이터가 없을 때만 호출
   useEffect(() => {
+    // 이미 데이터가 있으면 스킵 (페이지 이동 후 복귀 시)
+    const existingData = recommendationsByFilter['filter2'];
+    if (existingData && existingData.length > 0) {
+      // 스케줄러 상태와 트레이딩 모드만 업데이트
+      fetchSchedulerStatus();
+      fetchTradingMode();
+      return;
+    }
+    
     setIsLoading(true);
     Promise.all([
       fetchRecommendations('filter2', false),
@@ -1402,7 +1555,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   if (predictingFilter) {
     return (
       <div className="p-8 max-w-7xl mx-auto">
-        <AIThinkingLoader />
+        <AIThinkingLoader modelName={modelName} />
       </div>
     );
   }
@@ -1457,51 +1610,29 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
           <NoRecommendationsMessage hasError={!!error} errorMsg={error || undefined} />
         ) : (
           <div className="space-y-4 animate-in fade-in duration-500">
-            {/* 자동매매 투자금 설정 패널 */}
-            <div className="bg-violet-500/10 border border-violet-500/30 rounded-xl p-4 mb-4">
-              <div className="flex items-center justify-between flex-wrap gap-4">
-                <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
-                    <Wallet className="w-5 h-5 text-violet-400" />
-                  </div>
-                  <div>
-                    <h4 className="text-white font-bold text-sm">자동매매 투자금 설정</h4>
-                    <p className="text-xs text-slate-400">날짜별 "자동매매" 버튼 클릭 시 적용됩니다</p>
-                  </div>
-                </div>
-                <div className="flex items-center gap-4">
-                  <div className="flex items-center gap-2">
-                    <label className="text-xs text-slate-400">투자금 비율:</label>
-                    <div className="flex items-center bg-slate-800 rounded-lg px-3 py-1.5">
-                      <input
-                        type="number"
-                        min="10"
-                        max="100"
-                        step="10"
-                        value={allocationPercent}
-                        onChange={(e) => setAllocationPercent(Math.min(100, Math.max(10, parseInt(e.target.value) || 80)))}
-                        className="w-14 bg-transparent text-white text-sm font-bold text-right outline-none"
-                      />
-                      <span className="text-violet-400 font-bold text-sm ml-1">%</span>
+            {/* 선택 종목 자동매매 추가 패널 */}
+            {selectedStocks.size > 0 && (
+              <div className="bg-violet-500/10 border border-violet-500/30 rounded-xl p-4 mb-4 animate-in slide-in-from-top-2">
+                <div className="flex items-center justify-between flex-wrap gap-4">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-xl bg-violet-500/20 flex items-center justify-center">
+                      <Bot className="w-5 h-5 text-violet-400" />
+                    </div>
+                    <div>
+                      <h4 className="text-white font-bold text-sm">{selectedStocks.size}개 종목 선택됨</h4>
+                      <p className="text-xs text-slate-400">선택한 종목을 자동매매 대상에 추가할 수 있습니다</p>
                     </div>
                   </div>
-                  <div className="text-xs text-slate-500">
-                    = 총자산의 {allocationPercent}% 사용<br/>
-                    (종목당 1/{hasTodayRecommendations ? grouped[today]?.length || 5 : 5} 균등 배분)
-                  </div>
+                  <button
+                    onClick={handleAddSelectedToAutoTrading}
+                    className="flex items-center gap-2 px-4 py-2 bg-violet-500 hover:bg-violet-600 text-white border border-violet-500/30 rounded-xl text-sm font-bold transition-all"
+                  >
+                    <PlusCircle className="w-4 h-4" />
+                    자동매매에 추가
+                  </button>
                 </div>
               </div>
-              {autoTradeResult && (
-                <div className={`mt-3 p-2 rounded-lg text-sm ${
-                  autoTradeResult.success 
-                    ? 'bg-emerald-500/10 text-emerald-400' 
-                    : 'bg-rose-500/10 text-rose-400'
-                }`}>
-                  {autoTradeResult.message}
-                </div>
-              )}
-            </div>
-
+            )}
             {/* 오늘 추천이 없으면 안내 메시지 */}
             {!hasTodayRecommendations && (
               <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-4 mb-4">
@@ -1553,22 +1684,40 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                     <div className="text-sm text-slate-500">{stocks.length}종목</div>
                     <div className="h-px bg-slate-800 flex-1"></div>
 
-                    {/* Auto Trading Start Button */}
+                    {/* 해당 날짜 종목들을 자동매매에 추가하는 버튼 */}
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleStartAutoTradeWithPredictions(stocks);
+                        // 이미 등록되지 않은 종목만 필터링
+                        const newStocks = stocks.filter(s => !autoTradingCodes.has(s.code));
+                        if (newStocks.length === 0) {
+                          alert('이 날짜의 모든 종목이 이미 자동매매에 등록되어 있습니다.');
+                          return;
+                        }
+                        const autoTradingStocks: AutoTradingStock[] = newStocks.map(s => ({
+                          code: s.code,
+                          name: s.name,
+                          basePrice: s.base_price || s.close,
+                          currentPrice: realtimePrices[s.code]?.current_price || s.current_price,
+                          marketCap: s.market_cap,
+                          addedDate: new Date().toISOString(),
+                          source: s.model_name?.includes('model1') && s.model_name?.includes('model5') 
+                            ? 'ai_both' 
+                            : s.model_name === 'model1' ? 'ai_model1' : 'ai_model2',
+                          probability: s.probability,
+                          modelName: s.model_name,
+                        }));
+                        if (onAddToAutoTrading) {
+                          onAddToAutoTrading(autoTradingStocks);
+                          // 등록 후 서버에서 다시 로드
+                          setTimeout(() => loadAutoTradingCodesFromServer(), 500);
+                        }
                       }}
-                      disabled={isStartingAutoTrade}
-                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-500/10 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 rounded-lg text-xs font-bold transition-all disabled:opacity-50"
-                      title="이 날짜의 종목으로 자동매매 시작"
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-violet-500/10 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 rounded-lg text-xs font-bold transition-all"
+                      title="이 날짜의 종목을 자동매매에 추가"
                     >
-                      {isStartingAutoTrade ? (
-                        <Loader2 className="w-3 h-3 animate-spin" />
-                      ) : (
-                        <Play className="w-3 h-3" />
-                      )}
-                      자동매매
+                      <PlusCircle className="w-3 h-3" />
+                      자동매매에 추가
                     </button>
 
                     {/* Delete Date Group Button */}
@@ -1585,8 +1734,8 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                   {isExpanded && (
                     <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl overflow-hidden shadow-xl animate-in slide-in-from-top-2 duration-200">
                       {/* Table Header */}
-                      <div className="grid grid-cols-12 gap-4 p-4 bg-[#151925] border-b border-slate-800 text-xs font-bold text-slate-500 uppercase tracking-wider select-none">
-                        <div className="col-span-1 flex items-center justify-center gap-2">
+                      <div className="grid grid-cols-12 gap-2 p-4 bg-[#151925] border-b border-slate-800 text-xs font-bold text-slate-500 uppercase tracking-wider select-none">
+                        <div className="col-span-1 flex items-center justify-center">
                           <button
                             onClick={(e) => { e.stopPropagation(); handleSelectAll(stocks); }}
                             className="hover:text-point-cyan transition-colors"
@@ -1599,7 +1748,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                           </button>
                         </div>
                         <div
-                          className="col-span-3 pl-2 cursor-pointer hover:text-white flex items-center gap-1"
+                          className="col-span-2 pl-2 cursor-pointer hover:text-white flex items-center gap-1"
                           onClick={() => handleSort('name')}
                         >
                           종목명 {sortConfig.key === 'name' && <ArrowUpDown className="w-3 h-3" />}
@@ -1623,7 +1772,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                         >
                           기대수익 {sortConfig.key === 'expected_return' && <ArrowUpDown className="w-3 h-3" />}
                         </div>
-                        <div className="col-span-2 text-center">액션</div>
+                        <div className="col-span-3 text-center">액션</div>
                       </div>
 
                       {/* Table Body */}
@@ -1653,7 +1802,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                             ref={(el) => setStockRowRef(stock.code, el)}
                             data-code={stock.code}
                             onClick={() => onStockClick(stock)}
-                            className={`grid grid-cols-12 gap-4 p-4 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group items-center ${
+                            className={`grid grid-cols-12 gap-2 p-4 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group items-center ${
                               selectedStocks.has(stock.code) ? 'bg-point-cyan/5' : ''
                             } ${boughtInfo ? 'border-l-2 border-l-violet-500' : ''}`}
                           >
@@ -1670,15 +1819,31 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                               </button>
                             </div>
 
-                            {/* Name & Code */}
-                            <div className="col-span-3 flex flex-col justify-center pl-2">
+                            {/* Name & Code with Model Badge */}
+                            <div className="col-span-2 flex flex-col justify-center pl-2">
                               <div className="flex items-center gap-2">
+                                <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold flex-shrink-0 ${
+                                  stock.model_name?.includes('model1') && stock.model_name?.includes('model5')
+                                    ? 'bg-gradient-to-r from-violet-500/20 to-emerald-500/20 text-yellow-400'  // M1+M2
+                                    : stock.model_name === 'model1' 
+                                    ? 'bg-violet-500/20 text-violet-400' 
+                                    : 'bg-emerald-500/20 text-emerald-400'
+                                }`}>
+                                  {stock.model_name?.includes('model1') && stock.model_name?.includes('model5') 
+                                    ? 'M1+M2' 
+                                    : stock.model_name === 'model1' ? 'M1' : 'M2'}
+                                </span>
                                 <span className="text-white font-bold group-hover:text-point-cyan transition-colors truncate">{stock.name}</span>
                                 {stock.probability >= 0.9 && (
-                                  <Zap className="w-3 h-3 text-yellow-400 fill-yellow-400" />
+                                  <Zap className="w-3 h-3 text-yellow-400 fill-yellow-400 flex-shrink-0" />
+                                )}
+                                {autoTradingCodes.has(stock.code) && (
+                                  <span className="bg-point-cyan/20 text-point-cyan text-[9px] px-1.5 py-0.5 rounded-full font-bold flex-shrink-0">
+                                    자동매매
+                                  </span>
                                 )}
                                 {boughtInfo && (
-                                  <span className="bg-violet-500/20 text-violet-400 text-[9px] px-1.5 py-0.5 rounded-full font-bold">
+                                  <span className="bg-violet-500/20 text-violet-400 text-[9px] px-1.5 py-0.5 rounded-full font-bold flex-shrink-0">
                                     매수
                                   </span>
                                 )}
@@ -1742,7 +1907,43 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                             </div>
 
                             {/* Action Buttons */}
-                            <div className="col-span-2 flex items-center justify-center gap-1">
+                            <div className="col-span-3 flex items-center justify-center gap-1">
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (autoTradingCodes.has(stock.code)) {
+                                    alert('이미 자동매매에 등록된 종목입니다.');
+                                    return;
+                                  }
+                                  const autoTradingStock: AutoTradingStock = {
+                                    code: stock.code,
+                                    name: stock.name,
+                                    basePrice: stock.base_price || stock.close,
+                                    currentPrice: currentPrice,
+                                    marketCap: stock.market_cap,
+                                    addedDate: new Date().toISOString(),
+                                    source: stock.model_name?.includes('model1') && stock.model_name?.includes('model5') 
+                                      ? 'ai_both' 
+                                      : stock.model_name === 'model1' ? 'ai_model1' : 'ai_model2',
+                                    probability: stock.probability,
+                                    modelName: stock.model_name,
+                                  };
+                                  if (onAddToAutoTrading) {
+                                    onAddToAutoTrading([autoTradingStock]);
+                                    // 등록 후 서버에서 다시 로드
+                                    setTimeout(() => loadAutoTradingCodesFromServer(), 500);
+                                  }
+                                }}
+                                disabled={autoTradingCodes.has(stock.code)}
+                                className={`px-2 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 ${
+                                  autoTradingCodes.has(stock.code)
+                                    ? 'bg-slate-700/50 text-slate-500 border border-slate-600 cursor-not-allowed'
+                                    : 'bg-violet-500/10 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30'
+                                }`}
+                                title={autoTradingCodes.has(stock.code) ? '이미 등록됨' : '자동매매에 추가'}
+                              >
+                                <PlusCircle className="w-3 h-3" /> {autoTradingCodes.has(stock.code) ? '등록됨' : '자동매매'}
+                              </button>
                               <button
                                 onClick={(e) => handleDeleteStock(e, stock)}
                                 className="p-1.5 hover:bg-slate-700 text-slate-500 hover:text-slate-300 rounded-lg transition-all"
@@ -1780,6 +1981,47 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   // 장외 시간 여부
   const isAfterHours = !isMarketHours();
 
+  // 선택된 종목을 자동매매에 추가
+  const handleAddSelectedToAutoTrading = () => {
+    if (selectedStocks.size === 0) {
+      alert('선택된 종목이 없습니다.');
+      return;
+    }
+    
+    // 이미 등록되지 않은 종목만 필터링
+    const selectedList = recommendationsByFilter.filter2.filter(
+      s => selectedStocks.has(s.code) && !autoTradingCodes.has(s.code)
+    );
+    
+    if (selectedList.length === 0) {
+      alert('선택한 종목이 모두 이미 자동매매에 등록되어 있습니다.');
+      return;
+    }
+    
+    const autoTradingStocks: AutoTradingStock[] = selectedList.map(s => ({
+      code: s.code,
+      name: s.name,
+      basePrice: s.base_price || s.close,
+      currentPrice: realtimePrices[s.code]?.current_price || s.current_price,
+      marketCap: s.market_cap,
+      addedDate: new Date().toISOString(),
+      source: s.model_name?.includes('model1') && s.model_name?.includes('model5') 
+        ? 'ai_both' 
+        : s.model_name === 'model1' ? 'ai_model1' : 'ai_model2',
+      probability: s.probability,
+      modelName: s.model_name,
+    }));
+    
+    if (onAddToAutoTrading) {
+      onAddToAutoTrading(autoTradingStocks);
+      // 등록 후 서버에서 다시 로드
+      setTimeout(() => loadAutoTradingCodesFromServer(), 500);
+      setSelectedStocks(new Set());
+    } else {
+      alert('자동매매 추가 기능이 연결되지 않았습니다.');
+    }
+  };
+
   return (
     <div className="p-4 md:p-8 max-w-7xl mx-auto">
       {/* Header - 모바일 반응형 */}
@@ -1790,7 +2032,9 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
             AI 추천
           </h1>
           <p className="text-slate-500 mt-1 md:mt-2 text-sm md:text-base font-medium">
-            모델 선택 후 "AI 예측"을 누르면 필터2로 예측을 실행합니다.
+            {modelName === 'both' 
+              ? '모델1 + 모델2를 동시에 실행하여 통합 추천 종목을 표시합니다.' 
+              : '모델 선택 후 "AI 예측"을 누르면 필터2로 예측을 실행합니다.'}
           </p>
         </div>
 
@@ -1827,8 +2071,9 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
             onChange={(e) => setModelName(e.target.value as ModelName)}
             className="bg-[#1a1f2e] border border-slate-700 text-white text-sm px-3 py-2 rounded-xl focus:outline-none focus:border-point-cyan flex-shrink-0"
           >
+            <option value="both">🔥 모델1+2 동시</option>
             <option value="model1">모델1 (7-class)</option>
-            <option value="model5">모델5 (LightGBM 2%+)</option>
+            <option value="model5">모델2 (LightGBM)</option>
           </select>
 
           <button

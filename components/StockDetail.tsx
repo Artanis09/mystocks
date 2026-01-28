@@ -397,48 +397,37 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
 
             {/* 주요 지표 그리드 */}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-8 relative z-10">
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주가수익비율: 주가 / 주당순이익(EPS). 낮을수록 저평가 상태로 간주되지만 업종 평균과 비교가 필요합니다.">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="현재 주가입니다.">
                 <div className="flex items-center gap-2 mb-1">
-                  <Activity className="w-3.5 h-3.5 text-point-yellow" />
-                  <span className="text-[9px] text-slate-500 font-black uppercase">PER</span>
+                  <DollarSign className="w-3.5 h-3.5 text-point-yellow" />
+                  <span className="text-[9px] text-slate-500 font-black uppercase">현재가</span>
                 </div>
-                <p className="text-xl font-black text-white">{stock.per}</p>
+                <p className="text-xl font-black text-white">{(stock.currentPrice || 0).toLocaleString()}원</p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주가순자산비율: 주가 / 주당순자산가치(BPS). 1미만이면 주가가 장부상 순자산가치에도 못 미치는 저평가 상태입니다.">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="전일 종가 대비 등락률입니다.">
                 <div className="flex items-center gap-2 mb-1">
-                  <BarChart3 className="w-3.5 h-3.5 text-point-green" />
-                  <span className="text-[9px] text-slate-500 font-black uppercase">PBR</span>
+                  {(stock.changePercent || 0) >= 0 ? <TrendingUp className="w-3.5 h-3.5 text-rose-400" /> : <TrendingDown className="w-3.5 h-3.5 text-blue-400" />}
+                  <span className="text-[9px] text-slate-500 font-black uppercase">당일 상승률</span>
                 </div>
-                <p className="text-xl font-black text-white">{stock.pbr}</p>
+                <p className={`text-xl font-black ${(stock.changePercent || 0) >= 0 ? 'text-rose-400' : 'text-blue-400'}`}>
+                  {(stock.changePercent || 0) >= 0 ? '+' : ''}{(stock.changePercent || 0).toFixed(2)}%
+                </p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="주당순이익: 당기순이익 / 발행주식수. 기업이 1주당 얼마의 수익을 창출했는지를 나타내는 지표입니다.">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="시가총액: 발행 주식 수 × 현재 주가입니다.">
                 <div className="flex items-center gap-2 mb-1">
-                  <Zap className="w-3.5 h-3.5 text-point-orange" />
-                  <span className="text-[9px] text-slate-500 font-black uppercase">EPS</span>
+                  <BarChart3 className="w-3.5 h-3.5 text-point-orange" />
+                  <span className="text-[9px] text-slate-500 font-black uppercase">시총</span>
                 </div>
-                <p className="text-xl font-black text-white">{stock.eps.toLocaleString()}</p>
+                <p className="text-xl font-black text-white">{formatMarketCap(stock.marketCap)}</p>
               </div>
-              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="외국인 보유 비중: 외국인 투자자가 해당 기업의 주식을 얼마나 보유하고 있는지 나타냅니다.">
+              <div className="bg-[#0f121d] border border-slate-700 p-4 rounded-2xl cursor-help group/tip" title="전 거래일 대비 거래량 비율입니다. 100% 이상이면 전일보다 거래량이 많습니다.">
                 <div className="flex items-center gap-2 mb-1">
-                  <Globe className="w-3.5 h-3.5 text-point-cyan" />
-                  <span className="text-[9px] text-slate-500 font-black uppercase">Foreign</span>
+                  <Activity className="w-3.5 h-3.5 text-point-cyan" />
+                  <span className="text-[9px] text-slate-500 font-black uppercase">거래량 비율</span>
                 </div>
-                <p className="text-xl font-black text-point-cyan">{stock.foreignOwnership}%</p>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 py-6 border-t border-slate-700/50 relative z-10 text-[11px]">
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="당일 거래된 주식 수와 거래 총액입니다.">
-                <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">거래 유동성</p>
-                <p className="font-extrabold text-slate-200">{stock.tradingVolume} / {stock.transactionAmount}</p>
-              </div>
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="시장에서 실제 매매가 가능한 주식 수 비중입니다.">
-                <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">유통량</p>
-                <p className="font-extrabold text-slate-200">{stock.floatingShares}</p>
-              </div>
-              <div className="bg-[#0f121d]/50 p-3 rounded-xl border border-slate-800 cursor-help" title="최대주주 및 특수관계인의 지분율로, 경영권 안정 수준을 파악할 수 있습니다.">
-                <p className="text-slate-500 font-black mb-1 uppercase tracking-wider">최대주주</p>
-                <p className="font-extrabold text-slate-200">{stock.majorShareholderStake}%</p>
+                <p className={`text-xl font-black ${(stock.volumeRatio || 0) >= 100 ? 'text-point-cyan' : 'text-slate-400'}`}>
+                  {(stock.volumeRatio || 0).toFixed(0)}%
+                </p>
               </div>
             </div>
           </div>
@@ -452,57 +441,7 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
             onFormClose={() => setShowTradeModal(false)}
           />
 
-          {/* 캔들 차트 분석 */}
-          <div className="bg-[#1a1f2e] p-8 rounded-[2.5rem] border border-slate-700/50 shadow-2xl relative overflow-hidden">
-            <div className="flex flex-wrap items-center justify-between mb-8 gap-6">
-              <div className="flex items-center gap-4">
-                <div className="p-2.5 bg-point-cyan/10 rounded-xl border border-point-cyan/20">
-                  <CandleIcon className="w-6 h-6 text-point-cyan" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-black text-white uppercase tracking-widest">실시간 캔들 차트</h3>
-                  <p className="text-[10px] text-slate-500 font-bold">봉차트 분석 및 가격 흐름</p>
-                </div>
-              </div>
-              <div className="flex bg-[#0f121d] p-1.5 rounded-2xl border border-slate-700 shadow-inner">
-                {(['15m', 'D', 'W', 'M'] as TimeFrame[]).map((tf) => (
-                  <button
-                    key={tf}
-                    onClick={() => setTimeFrame(tf)}
-                    className={`px-4 py-2 text-[11px] font-black rounded-xl transition-all ${
-                      timeFrame === tf ? 'bg-point-cyan text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'
-                    }`}
-                  >
-                    {tf === '15m' ? '15분' : tf === 'D' ? '일봉' : tf === 'W' ? '주봉' : '월봉'}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div className="h-64 w-full overflow-x-auto custom-scrollbar">
-              {candleLoading ? (
-                <div className="flex items-center justify-center h-full text-slate-500">
-                  <p className="font-bold">로딩 중...</p>
-                </div>
-              ) : candleError || filteredCandleData.length === 0 ? (
-                <NoDataMessage message={candleError || "데이터없음"} />
-              ) : (
-                <div style={{ minWidth: '800px', width: '100%', height: '256px' }}>
-                  <ResponsiveContainer width="100%" height={256}>
-                    <BarChart data={filteredCandleData} barGap={0}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
-                      <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} dy={15} />
-                      <YAxis domain={['auto', 'auto']} orientation="right" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} />
-                      <Tooltip contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}} />
-                      <Bar dataKey="display" shape={<Candlestick />} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* 수급 및 실적 심층 분석 섹션 - 한 행에 한 가지씩 */}
+          {/* 수급 및 실적 심층 분석 섹션 - 상단 배치 */}
           <div className="space-y-8">
             {/* 분기별 영업이익률 추이 */}
             <div className="bg-[#1a1f2e] p-8 rounded-[2.5rem] border border-slate-700/50 shadow-2xl">
@@ -571,6 +510,56 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
                   </ResponsiveContainer>
                 )}
               </div>
+            </div>
+          </div>
+
+          {/* 캔들 차트 분석 */}
+          <div className="bg-[#1a1f2e] p-8 rounded-[2.5rem] border border-slate-700/50 shadow-2xl relative overflow-hidden">
+            <div className="flex flex-wrap items-center justify-between mb-8 gap-6">
+              <div className="flex items-center gap-4">
+                <div className="p-2.5 bg-point-cyan/10 rounded-xl border border-point-cyan/20">
+                  <CandleIcon className="w-6 h-6 text-point-cyan" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-black text-white uppercase tracking-widest">실시간 캔들 차트</h3>
+                  <p className="text-[10px] text-slate-500 font-bold">봉차트 분석 및 가격 흐름</p>
+                </div>
+              </div>
+              <div className="flex bg-[#0f121d] p-1.5 rounded-2xl border border-slate-700 shadow-inner">
+                {(['15m', 'D', 'W', 'M'] as TimeFrame[]).map((tf) => (
+                  <button
+                    key={tf}
+                    onClick={() => setTimeFrame(tf)}
+                    className={`px-4 py-2 text-[11px] font-black rounded-xl transition-all ${
+                      timeFrame === tf ? 'bg-point-cyan text-white shadow-lg' : 'text-slate-500 hover:text-slate-300'
+                    }`}
+                  >
+                    {tf === '15m' ? '15분' : tf === 'D' ? '일봉' : tf === 'W' ? '주봉' : '월봉'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="h-64 w-full overflow-x-auto custom-scrollbar">
+              {candleLoading ? (
+                <div className="flex items-center justify-center h-full text-slate-500">
+                  <p className="font-bold">로딩 중...</p>
+                </div>
+              ) : candleError || filteredCandleData.length === 0 ? (
+                <NoDataMessage message={candleError || "데이터없음"} />
+              ) : (
+                <div style={{ minWidth: '800px', width: '100%', height: '256px' }}>
+                  <ResponsiveContainer width="100%" height={256}>
+                    <BarChart data={filteredCandleData} barGap={0}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
+                      <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} dy={15} />
+                      <YAxis domain={['auto', 'auto']} orientation="right" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} />
+                      <Tooltip contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}} />
+                      <Bar dataKey="display" shape={<Candlestick />} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
             </div>
           </div>
 

@@ -13,6 +13,7 @@ import { StockDetail } from './components/StockDetail';
 import { AddStockModal } from './components/AddStockModal';
 import { GroupReturnsPanel } from './components/GroupReturnsPanel';
 import { Button } from './components/Button';
+import { AutoTradingStock } from './types';
 import { 
   Search, 
   PlusCircle, 
@@ -47,6 +48,101 @@ const App: React.FC = () => {
   const [expandedGroupId, setExpandedGroupId] = useState<string | null>(null);
   const [groupReturns, setGroupReturns] = useState<{ [key: string]: GroupReturnSummary }>({});
   const [selectedRecStock, setSelectedRecStock] = useState<StockData | null>(null);
+  
+  // 자동매매 종목 상태 (AI추천에서 추가된 종목들)
+  const [pendingAutoTradingStocks, setPendingAutoTradingStocks] = useState<AutoTradingStock[]>([]);
+  
+  // 이미 추가된 종목들 추적 (중복 방지)
+  const addedStockCodesRef = React.useRef<Set<string>>(new Set());
+  
+  // 컴포넌트 마운트 시 서버에서 이미 저장된 종목으로 ref 초기화
+  useEffect(() => {
+    const loadFromServer = async () => {
+      try {
+        const response = await fetch(`${API_BASE_URL}/auto-trading/target-stocks`);
+        if (response.ok) {
+          const data = await response.json();
+          const stocks = data.stocks || [];
+          addedStockCodesRef.current = new Set(stocks.map((s: any) => s.code));
+          console.log('[App] 기존 자동매매 종목 로드:', addedStockCodesRef.current.size, '개');
+        }
+      } catch (e) {
+        console.error('[App] 자동매매 종목 로드 실패:', e);
+      }
+    };
+    loadFromServer();
+  }, []);
+
+  // AI추천에서 자동매매에 종목 추가 (서버에 저장)
+  const handleAddToAutoTrading = async (stocks: AutoTradingStock[]) => {
+    // 1. 입력 stocks 내에서 중복 제거 (같은 code는 하나만)
+    const uniqueStocksMap = new Map<string, AutoTradingStock>();
+    stocks.forEach(s => {
+      if (!uniqueStocksMap.has(s.code)) {
+        uniqueStocksMap.set(s.code, s);
+      } else {
+        // 이미 있으면 M1+M2로 병합
+        const existing = uniqueStocksMap.get(s.code)!;
+        if (existing.modelName && s.modelName && !existing.modelName.includes(s.modelName)) {
+          existing.modelName = 'model1+model5';
+          existing.source = 'ai_both';
+        }
+      }
+    });
+    const uniqueStocks = Array.from(uniqueStocksMap.values());
+    
+    if (uniqueStocks.length === 0) {
+      alert('추가할 종목이 없습니다.');
+      return;
+    }
+    
+    // 서버에 저장
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/target-stocks`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ stocks: uniqueStocks.map(s => ({
+          code: s.code,
+          name: s.name,
+          base_price: s.basePrice,
+          current_price: s.currentPrice,
+          market_cap: s.marketCap,
+          source: s.source,
+          probability: s.probability,
+          model_name: s.modelName,
+        })) }),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({}));
+        throw new Error(errorData.error || '서버 저장 실패');
+      }
+      
+      const data = await response.json();
+      // 추가된 종목 코드 기록
+      uniqueStocks.forEach(s => addedStockCodesRef.current.add(s.code));
+      
+      // 자동매매 페이지로 이동
+      setCurrentPage('autotrading');
+      
+      if (data.added_count > 0) {
+        alert(`${data.added_count}개 종목이 자동매매에 추가되었습니다.`);
+      }
+    } catch (err) {
+      console.error('자동매매 종목 저장 실패:', err);
+      alert('종목 저장에 실패했습니다.');
+    }
+  };
+
+  // 자동매매 종목 변경 콜백
+  const handleAutoTradingStocksChange = (stocks: AutoTradingStock[]) => {
+    // 페이지에서 처리됨, pendingAutoTradingStocks 초기화
+    if (pendingAutoTradingStocks.length > 0) {
+      setPendingAutoTradingStocks([]);
+    }
+    // 추가된 종목 목록 업데이트
+    addedStockCodesRef.current = new Set(stocks.map(s => s.code));
+  };
 
   // 그룹별 수익률 로드
   const loadGroupReturns = async (groupIds: string[]) => {
@@ -242,6 +338,8 @@ const App: React.FC = () => {
         tradingVolume: '0',
         transactionAmount: '0',
         foreignOwnership: 0,
+        changePercent: rec.current_change || 0, // 당일 상승률
+        volumeRatio: (rec as any).volume_ratio || 0, // 전 거래일 대비 거래량 비율
         quarterlyMargins: [],
         memos: [],
         addedAt: new Date().toISOString()
@@ -485,9 +583,19 @@ const App: React.FC = () => {
             </div>
           );
         }
-        return <Recommendations onStockClick={handleRecStockClick} />;
+        return (
+          <Recommendations 
+            onStockClick={handleRecStockClick} 
+            onAddToAutoTrading={handleAddToAutoTrading}
+          />
+        );
       case 'autotrading':
-        return <AutoTradingPage />;
+        return (
+          <AutoTradingPage 
+            initialStocks={pendingAutoTradingStocks}
+            onStocksChange={handleAutoTradingStocksChange}
+          />
+        );
       default:
         return <Dashboard />;
     }

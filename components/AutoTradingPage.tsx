@@ -33,8 +33,20 @@ import {
   ToggleRight,
   CircleDot,
   Wifi,
-  WifiOff
+  WifiOff,
+  PlusCircle,
+  Trash2,
+  X,
+  Save
 } from 'lucide-react';
+import { 
+  AutoTradingStock, 
+  TradingStrategyConfig, 
+  BuyTimeConfig, 
+  SellCondition,
+  DEFAULT_TRADING_STRATEGY 
+} from '../types';
+import { loadStockList, searchStocks } from '../services/stockService';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
@@ -205,7 +217,88 @@ const PhaseBadge: React.FC<{ phase: string }> = ({ phase }) => {
   );
 };
 
-export const AutoTradingPage: React.FC = () => {
+// Props 타입
+interface AutoTradingPageProps {
+  initialStocks?: AutoTradingStock[];
+  onStocksChange?: (stocks: AutoTradingStock[]) => void;
+}
+
+// 로컬스토리지 키 (전략 설정만 로컬에 저장)
+const TRADING_STRATEGY_KEY = 'trading_strategy_config';
+
+// 서버에서 자동매매 대상 종목 로드
+const fetchTargetStocksFromServer = async (): Promise<AutoTradingStock[]> => {
+  try {
+    const response = await fetch('/api/auto-trading/target-stocks');
+    if (response.ok) {
+      const data = await response.json();
+      return data.stocks || [];
+    }
+  } catch (e) {
+    console.error('자동매매 대상 종목 로드 실패:', e);
+  }
+  return [];
+};
+
+// 서버에 자동매매 대상 종목 저장
+const saveTargetStocksToServer = async (stocks: AutoTradingStock[]): Promise<boolean> => {
+  try {
+    const response = await fetch('/api/auto-trading/target-stocks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stocks }),
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('자동매매 대상 종목 저장 실패:', e);
+    return false;
+  }
+};
+
+// 서버에서 자동매매 대상 종목 삭제
+const deleteTargetStocksFromServer = async (codes: string[]): Promise<boolean> => {
+  try {
+    const response = await fetch('/api/auto-trading/target-stocks', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes }),
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('자동매매 대상 종목 삭제 실패:', e);
+    return false;
+  }
+};
+
+// 서버에서 자동매매 대상 종목 전체 삭제
+const clearTargetStocksFromServer = async (): Promise<boolean> => {
+  try {
+    const response = await fetch('/api/auto-trading/target-stocks/clear', {
+      method: 'DELETE',
+    });
+    return response.ok;
+  } catch (e) {
+    console.error('자동매매 대상 종목 전체 삭제 실패:', e);
+    return false;
+  }
+};
+
+// 전략 설정 로드 (로컬 저장 유지)
+const loadTradingStrategy = (): TradingStrategyConfig => {
+  try {
+    const saved = localStorage.getItem(TRADING_STRATEGY_KEY);
+    return saved ? JSON.parse(saved) : DEFAULT_TRADING_STRATEGY;
+  } catch {
+    return DEFAULT_TRADING_STRATEGY;
+  }
+};
+
+// 전략 설정 저장 (로컬 저장 유지)
+const saveTradingStrategy = (config: TradingStrategyConfig) => {
+  localStorage.setItem(TRADING_STRATEGY_KEY, JSON.stringify(config));
+};
+
+export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks, onStocksChange }) => {
   const [status, setStatus] = useState<StrategyStatus | null>(null);
   const [config, setConfig] = useState<StrategyConfig | null>(null);
   const [tradeHistory, setTradeHistory] = useState<TradeHistory[]>([]);
@@ -226,6 +319,21 @@ export const AutoTradingPage: React.FC = () => {
   const [showLogs, setShowLogs] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  const [showStrategySettings, setShowStrategySettings] = useState(false);
+  const [showAddStock, setShowAddStock] = useState(false);
+  
+  // 자동매매 대상 종목 (서버에서 로드)
+  const [tradingStocks, setTradingStocks] = useState<AutoTradingStock[]>([]);
+  const [isLoadingStocks, setIsLoadingStocks] = useState(true);
+  
+  // 전략 설정 (로컬스토리지)
+  const [strategyConfig, setStrategyConfig] = useState<TradingStrategyConfig>(loadTradingStrategy);
+  
+  // 수동 종목 추가 입력
+  const [newStockCode, setNewStockCode] = useState('');
+  const [isSearchingStock, setIsSearchingStock] = useState(false);
+  const [stockSearchResults, setStockSearchResults] = useState<{ code: string; name: string }[]>([]);
+  const [showSearchResults, setShowSearchResults] = useState(false);
   
   // 수동 주문
   const [manualCode, setManualCode] = useState('');
@@ -246,6 +354,49 @@ export const AutoTradingPage: React.FC = () => {
   // 투자금 할당 비율
   const [allocationPercent, setAllocationPercent] = useState<number>(80);
   const [isSavingAllocation, setIsSavingAllocation] = useState(false);
+
+  // 서버에서 자동매매 대상 종목 로드
+  const loadTradingStocksFromServer = useCallback(async () => {
+    setIsLoadingStocks(true);
+    try {
+      const stocks = await fetchTargetStocksFromServer();
+      setTradingStocks(stocks);
+    } catch (e) {
+      console.error('자동매매 대상 종목 로드 실패:', e);
+    } finally {
+      setIsLoadingStocks(false);
+    }
+  }, []);
+
+  // 컴포넌트 마운트 시 서버에서 종목 로드
+  useEffect(() => {
+    loadTradingStocksFromServer();
+  }, [loadTradingStocksFromServer]);
+
+  // initialStocks가 변경되면 서버에 추가
+  useEffect(() => {
+    if (initialStocks && initialStocks.length > 0) {
+      // 서버에 저장
+      saveTargetStocksToServer(initialStocks).then(success => {
+        if (success) {
+          // 저장 성공 후 다시 로드
+          loadTradingStocksFromServer();
+        }
+      });
+    }
+  }, [initialStocks, loadTradingStocksFromServer]);
+
+  // tradingStocks 변경시 부모에게 알림 (서버 저장은 개별 액션에서 처리)
+  useEffect(() => {
+    if (onStocksChange) {
+      onStocksChange(tradingStocks);
+    }
+  }, [tradingStocks, onStocksChange]);
+
+  // 전략 설정 변경시 저장
+  useEffect(() => {
+    saveTradingStrategy(strategyConfig);
+  }, [strategyConfig]);
 
   // Heartbeat 조회 (엔진 실행 여부 신뢰성 확인)
   const fetchHeartbeat = useCallback(async () => {
@@ -327,6 +478,8 @@ export const AutoTradingPage: React.FC = () => {
       const data = await response.json();
       if (data.success) {
         setAllocationPercent(percent);
+        // 전략 설정도 업데이트
+        setStrategyConfig(prev => ({ ...prev, allocationPercent: percent }));
       } else {
         alert(data.error || '투자금 비율 저장 실패');
       }
@@ -335,6 +488,125 @@ export const AutoTradingPage: React.FC = () => {
     } finally {
       setIsSavingAllocation(false);
     }
+  };
+
+  // 종목 추가 (수동)
+  const handleAddStock = async () => {
+    if (!newStockCode.trim()) {
+      alert('종목코드를 입력하세요.');
+      return;
+    }
+    
+    const code = newStockCode.trim().toUpperCase();
+    
+    // 중복 체크
+    if (tradingStocks.some(s => s.code === code)) {
+      alert('이미 등록된 종목입니다.');
+      return;
+    }
+    
+    setIsSearchingStock(true);
+    try {
+      // 종목 정보 조회
+      const response = await fetch(`${API_BASE_URL}/stock/${code}`);
+      if (response.ok) {
+        const data = await response.json();
+        const newStock: AutoTradingStock = {
+          code: code,
+          name: data.name || code,
+          basePrice: data.close || data.current_price || 0,
+          currentPrice: data.current_price,
+          marketCap: data.market_cap || 0,
+          addedDate: new Date().toISOString(),
+          source: 'manual',
+        };
+        
+        // 서버에 저장
+        const success = await saveTargetStocksToServer([newStock]);
+        if (success) {
+          await loadTradingStocksFromServer();  // 서버에서 다시 로드
+          setNewStockCode('');
+          setShowAddStock(false);
+        } else {
+          alert('종목 저장에 실패했습니다.');
+        }
+      } else {
+        alert('종목 정보를 찾을 수 없습니다.');
+      }
+    } catch (err) {
+      alert('종목 조회 중 오류가 발생했습니다.');
+    } finally {
+      setIsSearchingStock(false);
+    }
+  };
+
+  // 종목 제거
+  const handleRemoveStock = async (code: string) => {
+    if (!window.confirm('해당 종목을 자동매매 대상에서 제거하시겠습니까?')) return;
+    
+    const success = await deleteTargetStocksFromServer([code]);
+    if (success) {
+      await loadTradingStocksFromServer();  // 서버에서 다시 로드
+    } else {
+      alert('종목 삭제에 실패했습니다.');
+    }
+  };
+
+  // 전체 종목 제거
+  const handleClearAllStocks = async () => {
+    if (!window.confirm('모든 자동매매 대상 종목을 제거하시겠습니까?')) return;
+    
+    const success = await clearTargetStocksFromServer();
+    if (success) {
+      setTradingStocks([]);
+    } else {
+      alert('전체 종목 삭제에 실패했습니다.');
+    }
+  };
+
+  // 전략 설정 업데이트 핸들러
+  const handleUpdateStrategy = (updates: Partial<TradingStrategyConfig>) => {
+    setStrategyConfig(prev => ({ ...prev, ...updates }));
+  };
+
+  // 매수 시간 설정 토글
+  const handleToggleBuyTime = (index: number) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      buyTimeConfigs: prev.buyTimeConfigs.map((config, i) => 
+        i === index ? { ...config, enabled: !config.enabled } : config
+      )
+    }));
+  };
+
+  // 매수 방법 변경
+  const handleChangeBuyMethod = (index: number, method: BuyTimeConfig['orderMethod']) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      buyTimeConfigs: prev.buyTimeConfigs.map((config, i) => 
+        i === index ? { ...config, orderMethod: method } : config
+      )
+    }));
+  };
+
+  // 매도 조건 토글
+  const handleToggleSellCondition = (type: SellCondition['type']) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      sellConditions: prev.sellConditions.map(cond => 
+        cond.type === type ? { ...cond, enabled: !cond.enabled } : cond
+      )
+    }));
+  };
+
+  // 매도 조건 값 변경
+  const handleChangeSellValue = (type: SellCondition['type'], value: number) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      sellConditions: prev.sellConditions.map(cond => 
+        cond.type === type ? { ...cond, value } : cond
+      )
+    }));
   };
 
   // 서버 저장 설정 업데이트
@@ -635,7 +907,7 @@ export const AutoTradingPage: React.FC = () => {
   }
 
   // 상태별 포지션 분류
-  const allPositions = status ? Object.values(status.positions) : [];
+  const allPositions: Position[] = status ? Object.values(status.positions) : [];
   const activePositions = allPositions.filter(p => p.state === 'ENTERED');
   const watchingPositions = allPositions.filter(p => p.state === 'WATCHING');
   const pendingPositions = allPositions.filter(p => p.state.includes('PENDING'));
@@ -858,18 +1130,11 @@ export const AutoTradingPage: React.FC = () => {
       {/* 액션 버튼 */}
       <div className="flex flex-wrap gap-2 mb-6">
         <button
-          onClick={handleBuildUniverse}
-          disabled={isUniverseBuildDisabled()}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
-            isUniverseBuildDisabled()
-              ? 'bg-slate-500/10 border border-slate-500/30 text-slate-500 cursor-not-allowed'
-              : 'bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20'
-          }`}
-          title={isUniverseBuildDisabled() ? '16:00~18:00 데이터 수집 중 (구축 불가)' : '유니버스 구축'}
+          onClick={() => setShowAddStock(!showAddStock)}
+          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20 transition-all text-sm font-bold"
         >
-          <Database className="w-4 h-4" />
-          유니버스 구축
-          {isUniverseBuildDisabled() && <span className="text-xs">(수집중)</span>}
+          <PlusCircle className="w-4 h-4" />
+          종목 추가
         </button>
         
         <button
@@ -881,11 +1146,23 @@ export const AutoTradingPage: React.FC = () => {
         </button>
         
         <button
+          onClick={() => setShowStrategySettings(!showStrategySettings)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold transition-all ${
+            showStrategySettings 
+              ? 'bg-violet-500/30 border border-violet-500/50 text-violet-300' 
+              : 'bg-violet-500/10 border border-violet-500/30 text-violet-400 hover:bg-violet-500/20'
+          }`}
+        >
+          <Settings className="w-4 h-4" />
+          매매 전략 설정
+        </button>
+        
+        <button
           onClick={() => setShowConfig(!showConfig)}
           className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-500/10 border border-slate-500/30 text-slate-400 hover:bg-slate-500/20 transition-all text-sm font-bold"
         >
           <Settings className="w-4 h-4" />
-          전략 설정
+          기존 전략
         </button>
         
         <button
@@ -914,7 +1191,7 @@ export const AutoTradingPage: React.FC = () => {
             </div>
             <div>
               <h3 className="text-white font-bold text-sm">투자금 할당 비율</h3>
-              <p className="text-xs text-slate-400">총 자산 중 자동매매에 사용할 비율 (AI 예측 종목 자동매매 시 적용)</p>
+              <p className="text-xs text-slate-400">총 자산 중 자동매매에 사용할 비율</p>
             </div>
           </div>
           <div className="flex items-center gap-4">
@@ -924,37 +1201,313 @@ export const AutoTradingPage: React.FC = () => {
                 min="10"
                 max="100"
                 step="10"
-                value={allocationPercent}
-                onChange={(e) => setAllocationPercent(parseInt(e.target.value))}
+                value={strategyConfig.allocationPercent}
+                onChange={(e) => handleUpdateStrategy({ allocationPercent: parseInt(e.target.value) })}
                 className="w-32 accent-violet-500"
               />
               <div className="flex items-center bg-slate-800 rounded-lg px-3 py-1.5 min-w-[80px]">
-                <span className="text-white text-sm font-bold">{allocationPercent}</span>
+                <span className="text-white text-sm font-bold">{strategyConfig.allocationPercent}</span>
                 <span className="text-violet-400 font-bold text-sm ml-1">%</span>
               </div>
             </div>
             <button
-              onClick={() => saveAllocationPercent(allocationPercent)}
+              onClick={() => saveAllocationPercent(strategyConfig.allocationPercent)}
               disabled={isSavingAllocation}
               className="px-4 py-2 bg-violet-500/20 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 rounded-lg text-xs font-bold transition-all disabled:opacity-50"
             >
-              {isSavingAllocation ? <Loader2 className="w-4 h-4 animate-spin" /> : '저장'}
+              {isSavingAllocation ? <Loader2 className="w-4 h-4 animate-spin" /> : '서버 저장'}
             </button>
           </div>
         </div>
         <div className="mt-3 text-xs text-slate-500">
-          💡 총자산의 <span className="text-violet-400 font-bold">{allocationPercent}%</span>를 자동매매에 사용하고, 
-          각 종목당 <span className="text-point-cyan font-bold">1/{config?.max_positions || 5}</span> 균등 배분합니다.
-          (종목당 약 {((allocationPercent / (config?.max_positions || 5))).toFixed(1)}%)
+          💡 총자산의 <span className="text-violet-400 font-bold">{strategyConfig.allocationPercent}%</span>를 자동매매에 사용하고, 
+          각 종목당 <span className="text-point-cyan font-bold">1/{strategyConfig.maxPositions}</span> 균등 배분합니다.
+          (종목당 약 {((strategyConfig.allocationPercent / strategyConfig.maxPositions)).toFixed(1)}%)
         </div>
       </div>
+
+      {/* 종목 추가 패널 */}
+      {showAddStock && (
+        <div className="bg-[#1a1f2e] border border-emerald-500/30 rounded-2xl p-4 mb-6 animate-in slide-in-from-top-2 duration-200">
+          <h3 className="text-white font-bold mb-4 flex items-center gap-2">
+            <PlusCircle className="w-5 h-5 text-emerald-400" />
+            종목 추가 (수동)
+          </h3>
+          <div className="relative">
+            <div className="flex gap-3">
+              <div className="flex-1 relative">
+                <input
+                  type="text"
+                  value={newStockCode}
+                  onChange={async (e) => {
+                    const value = e.target.value;
+                    setNewStockCode(value);
+                    
+                    // 검색어가 2자 이상이면 검색 실행
+                    if (value.length >= 2) {
+                      await loadStockList();
+                      const results = searchStocks(value);
+                      setStockSearchResults(results.map(r => ({ code: r.code, name: r.name })));
+                      setShowSearchResults(results.length > 0);
+                    } else {
+                      setStockSearchResults([]);
+                      setShowSearchResults(false);
+                    }
+                  }}
+                  onFocus={async () => {
+                    if (newStockCode.length >= 2) {
+                      await loadStockList();
+                      const results = searchStocks(newStockCode);
+                      setStockSearchResults(results.map(r => ({ code: r.code, name: r.name })));
+                      setShowSearchResults(results.length > 0);
+                    }
+                  }}
+                  onBlur={() => {
+                    // 클릭 처리를 위해 딜레이
+                    setTimeout(() => setShowSearchResults(false), 200);
+                  }}
+                  onKeyDown={(e) => e.key === 'Enter' && handleAddStock()}
+                  placeholder="종목코드 또는 종목명 입력 (예: 005930 또는 삼성전자)"
+                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-white text-sm focus:outline-none focus:border-emerald-500"
+                />
+                
+                {/* 검색 결과 드롭다운 */}
+                {showSearchResults && stockSearchResults.length > 0 && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 max-h-60 overflow-y-auto">
+                    {stockSearchResults.map((stock) => (
+                      <button
+                        key={stock.code}
+                        onClick={() => {
+                          setNewStockCode(stock.code);
+                          setShowSearchResults(false);
+                        }}
+                        className="w-full px-4 py-2 text-left hover:bg-slate-700 transition-colors flex justify-between items-center"
+                      >
+                        <span className="text-white">{stock.name}</span>
+                        <span className="text-slate-400 text-sm">{stock.code}</span>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button
+                onClick={handleAddStock}
+                disabled={isSearchingStock}
+                className="px-4 py-2 bg-emerald-500 hover:bg-emerald-600 text-white font-bold rounded-lg transition-all flex items-center gap-2 disabled:opacity-50"
+              >
+                {isSearchingStock ? <Loader2 className="w-4 h-4 animate-spin" /> : <PlusCircle className="w-4 h-4" />}
+                추가
+              </button>
+              <button
+                onClick={() => setShowAddStock(false)}
+                className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-300 font-bold rounded-lg transition-all"
+              >
+                닫기
+              </button>
+            </div>
+          </div>
+          <p className="text-xs text-slate-500 mt-2">
+            💡 종목코드(6자리) 또는 종목명을 입력하면 검색됩니다. AI추천 페이지에서 종목을 선택하여 추가할 수도 있습니다.
+          </p>
+        </div>
+      )}
+
+      {/* 매매 전략 설정 패널 (신규) */}
+      {showStrategySettings && (
+        <div className="bg-[#1a1f2e] border border-violet-500/30 rounded-2xl p-4 mb-6 animate-in slide-in-from-top-2 duration-200">
+          <h3 className="text-white font-bold mb-4 flex items-center gap-2">
+            <Settings className="w-5 h-5 text-violet-400" />
+            커스텀 매매 전략 설정
+          </h3>
+          
+          {/* 매수 시간 및 방법 설정 */}
+          <div className="mb-6">
+            <h4 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
+              <ShoppingCart className="w-4 h-4 text-point-cyan" />
+              매수 기준 및 방법
+            </h4>
+            <div className="bg-slate-800/50 rounded-xl p-4">
+              <p className="text-xs text-slate-400 mb-4">각 시간대별로 매수 주문 방법을 설정할 수 있습니다.</p>
+              <div className="space-y-3">
+                {strategyConfig.buyTimeConfigs.map((timeConfig, idx) => (
+                  <div key={idx} className="flex items-center gap-4 flex-wrap">
+                    {/* 활성화 토글 */}
+                    <button
+                      onClick={() => handleToggleBuyTime(idx)}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold transition-all min-w-[100px] ${
+                        timeConfig.enabled
+                          ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                          : 'bg-slate-700 text-slate-400 border border-slate-600'
+                      }`}
+                    >
+                      {timeConfig.enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                      {timeConfig.time}
+                    </button>
+                    
+                    {/* 매수 방법 선택 */}
+                    <div className="flex gap-2">
+                      <button
+                        onClick={() => handleChangeBuyMethod(idx, 'market')}
+                        disabled={!timeConfig.enabled}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
+                          timeConfig.orderMethod === 'market'
+                            ? 'bg-point-cyan text-white'
+                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                        }`}
+                      >
+                        시장가
+                      </button>
+                      <button
+                        onClick={() => handleChangeBuyMethod(idx, 'open_price')}
+                        disabled={!timeConfig.enabled}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
+                          timeConfig.orderMethod === 'open_price'
+                            ? 'bg-point-cyan text-white'
+                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                        }`}
+                      >
+                        시가 지정가
+                      </button>
+                      <button
+                        onClick={() => handleChangeBuyMethod(idx, 'ask_plus_2tick')}
+                        disabled={!timeConfig.enabled}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
+                          timeConfig.orderMethod === 'ask_plus_2tick'
+                            ? 'bg-point-cyan text-white'
+                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
+                        }`}
+                      >
+                        ASK+2틱
+                      </button>
+                    </div>
+                    
+                    {/* 시간대 설명 */}
+                    <span className="text-xs text-slate-500">
+                      {idx === 0 && '(프리마켓 동시호가)'}
+                      {idx === 1 && '(정규장 시작)'}
+                      {idx === 2 && '(장중)'}
+                      {idx === 3 && '(종가 동시호가)'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          {/* 매도 조건 설정 */}
+          <div className="mb-6">
+            <h4 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
+              <Banknote className="w-4 h-4 text-rose-400" />
+              매도 기준 및 방법 (복수 선택 가능)
+            </h4>
+            <div className="bg-slate-800/50 rounded-xl p-4">
+              <p className="text-xs text-slate-400 mb-4">여러 조건을 동시에 활성화하면, 먼저 충족되는 조건에 따라 매도됩니다.</p>
+              <div className="space-y-3">
+                {strategyConfig.sellConditions.map((condition, idx) => (
+                  <div key={idx} className="flex items-center gap-4 flex-wrap">
+                    {/* 활성화 토글 */}
+                    <button
+                      onClick={() => handleToggleSellCondition(condition.type)}
+                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold transition-all min-w-[120px] ${
+                        condition.enabled
+                          ? 'bg-rose-500/20 text-rose-400 border border-rose-500/30'
+                          : 'bg-slate-700 text-slate-400 border border-slate-600'
+                      }`}
+                    >
+                      {condition.enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
+                      {condition.type === 'take_profit' && '익절'}
+                      {condition.type === 'trailing_stop' && '고가대비'}
+                      {condition.type === 'stop_loss' && '손절'}
+                      {condition.type === 'eod_close' && '종가매도'}
+                    </button>
+                    
+                    {/* 값 입력 (종가매도 제외) */}
+                    {condition.type !== 'eod_close' && (
+                      <div className="flex items-center gap-2">
+                        <span className="text-xs text-slate-400">
+                          {condition.type === 'take_profit' && '매수가 대비'}
+                          {condition.type === 'trailing_stop' && '고가 대비'}
+                          {condition.type === 'stop_loss' && '매수가 대비'}
+                        </span>
+                        <div className="flex items-center bg-slate-700 rounded-lg px-2 py-1">
+                          <span className="text-slate-400 text-sm">
+                            {condition.type === 'take_profit' ? '+' : '-'}
+                          </span>
+                          <input
+                            type="number"
+                            value={condition.value || 0}
+                            onChange={(e) => handleChangeSellValue(condition.type, Math.abs(parseFloat(e.target.value) || 0))}
+                            disabled={!condition.enabled}
+                            className="w-12 bg-transparent text-white text-sm text-right outline-none disabled:opacity-50"
+                          />
+                          <span className="text-slate-400 text-sm ml-1">%</span>
+                        </div>
+                        <span className="text-xs text-slate-500">
+                          {condition.type === 'take_profit' && '이상 시 매도 (익절)'}
+                          {condition.type === 'trailing_stop' && '하락 시 매도'}
+                          {condition.type === 'stop_loss' && '이하 시 매도 (손절)'}
+                        </span>
+                      </div>
+                    )}
+                    
+                    {condition.type === 'eod_close' && (
+                      <span className="text-xs text-slate-500">장 마감 전 전량 매도 (15:15~15:20)</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          {/* 최대 포지션 수 설정 */}
+          <div className="mb-4">
+            <h4 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
+              <Target className="w-4 h-4 text-amber-400" />
+              최대 포지션 수
+            </h4>
+            <div className="bg-slate-800/50 rounded-xl p-4 flex items-center gap-4">
+              <input
+                type="range"
+                min="1"
+                max="10"
+                value={strategyConfig.maxPositions}
+                onChange={(e) => handleUpdateStrategy({ maxPositions: parseInt(e.target.value) })}
+                className="w-48 accent-amber-500"
+              />
+              <div className="flex items-center bg-slate-700 rounded-lg px-3 py-1.5">
+                <span className="text-white text-sm font-bold">{strategyConfig.maxPositions}</span>
+                <span className="text-amber-400 font-bold text-sm ml-1">개</span>
+              </div>
+              <span className="text-xs text-slate-500">종목당 약 {(strategyConfig.allocationPercent / strategyConfig.maxPositions).toFixed(1)}% 배분</span>
+            </div>
+          </div>
+          
+          {/* 전략 요약 */}
+          <div className="bg-slate-900/50 border border-slate-700 rounded-xl p-4 mt-4">
+            <h4 className="text-sm font-bold text-white mb-2">📋 현재 전략 요약</h4>
+            <div className="text-xs text-slate-400 space-y-1">
+              <p>• 매수 시간: {strategyConfig.buyTimeConfigs.filter(c => c.enabled).map(c => c.time).join(', ') || '없음'}</p>
+              <p>• 매수 방법: {strategyConfig.buyTimeConfigs.filter(c => c.enabled).map(c => 
+                c.orderMethod === 'market' ? '시장가' : c.orderMethod === 'open_price' ? '시가 지정가' : 'ASK+2틱'
+              ).join(', ') || '-'}</p>
+              <p>• 매도 조건: {strategyConfig.sellConditions.filter(c => c.enabled).map(c => {
+                if (c.type === 'take_profit') return `익절 +${c.value}%`;
+                if (c.type === 'trailing_stop') return `고가대비 -${c.value}%`;
+                if (c.type === 'stop_loss') return `손절 -${c.value}%`;
+                return '종가매도';
+              }).join(', ') || '없음'}</p>
+              <p>• 최대 포지션: {strategyConfig.maxPositions}개 (종목당 {(strategyConfig.allocationPercent / strategyConfig.maxPositions).toFixed(1)}%)</p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 전략 설정 패널 */}
       {showConfig && config && (
         <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-4 mb-6 animate-in slide-in-from-top-2 duration-200">
           <h3 className="text-white font-bold mb-4 flex items-center gap-2">
             <Settings className="w-5 h-5 text-point-cyan" />
-            전략 설정
+            기존 전략 설정 (전략1: 상한가 갭상승)
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
             <div>
@@ -1174,13 +1727,144 @@ export const AutoTradingPage: React.FC = () => {
         )}
       </div>
 
+      {/* 자동매매 대상 종목 (등록된 종목) */}
+      <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-6 overflow-hidden">
+        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
+          <h3 className="text-white font-bold flex items-center gap-2">
+            <Target className="w-5 h-5 text-violet-400" />
+            자동매매 대상 종목 ({tradingStocks.length})
+          </h3>
+          {tradingStocks.length > 0 && (
+            <button
+              onClick={handleClearAllStocks}
+              className="text-xs text-rose-400 hover:text-rose-300 transition-colors flex items-center gap-1"
+            >
+              <Trash2 className="w-3 h-3" />
+              전체 삭제
+            </button>
+          )}
+        </div>
+        
+        {tradingStocks.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="text-slate-500 border-b border-slate-800 bg-slate-800/30">
+                  <th className="text-left py-3 px-4">종목</th>
+                  <th className="text-left py-3 px-4">출처</th>
+                  <th className="text-right py-3 px-4">기준가</th>
+                  <th className="text-right py-3 px-4">시총</th>
+                  <th className="text-right py-3 px-4">확률</th>
+                  <th className="text-left py-3 px-4">등록일</th>
+                  <th className="text-center py-3 px-4">액션</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tradingStocks.map((stock) => (
+                  <tr key={stock.code} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+                    <td className="py-3 px-4">
+                      <div className="font-bold text-white">{stock.name}</div>
+                      <div className="text-xs text-slate-500">{stock.code}</div>
+                    </td>
+                    <td className="py-3 px-4">
+                      <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
+                        stock.source === 'manual' 
+                          ? 'bg-slate-500/20 text-slate-400'
+                          : stock.source === 'ai_model1'
+                            ? 'bg-violet-500/20 text-violet-400'
+                            : 'bg-emerald-500/20 text-emerald-400'
+                      }`}>
+                        {stock.source === 'manual' ? '수동' : stock.source === 'ai_model1' ? 'AI M1' : 'AI M2'}
+                      </span>
+                    </td>
+                    <td className="py-3 px-4 text-right text-white">{formatPrice(stock.basePrice)}원</td>
+                    <td className="py-3 px-4 text-right text-slate-400">
+                      {stock.marketCap ? `${(stock.marketCap / 100000000).toFixed(0)}억` : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-right">
+                      {stock.probability ? (
+                        <span className="text-point-cyan font-bold">{(stock.probability * 100).toFixed(1)}%</span>
+                      ) : '-'}
+                    </td>
+                    <td className="py-3 px-4 text-slate-400 text-xs">
+                      {new Date(stock.addedDate).toLocaleDateString('ko-KR')}
+                    </td>
+                    <td className="py-3 px-4 text-center">
+                      <button
+                        onClick={() => handleRemoveStock(stock.code)}
+                        className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="p-8 text-center text-slate-500">
+            <Database className="w-12 h-12 mx-auto mb-3 opacity-30" />
+            <p className="mb-2">등록된 자동매매 종목이 없습니다.</p>
+            <p className="text-xs text-slate-600">
+              "종목 추가" 버튼을 눌러 수동으로 추가하거나,<br/>
+              AI추천 페이지에서 종목을 선택하여 추가하세요.
+            </p>
+          </div>
+        )}
+      </div>
+
       {/* 전체 종목 상태 */}
       <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-6 overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
-          <h3 className="text-white font-bold flex items-center gap-2">
-            <Eye className="w-5 h-5 text-amber-400" />
-            전체 종목 상태 ({allPositions.length})
-          </h3>
+          <div className="flex items-center gap-3">
+            <h3 className="text-white font-bold flex items-center gap-2">
+              <Eye className="w-5 h-5 text-amber-400" />
+              전체 종목 상태 ({allPositions.length})
+            </h3>
+            {/* 삭제 버튼들 */}
+            {allPositions.length > 0 && (
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    if (confirm('청산 완료 및 건너뜀 종목을 모두 삭제하시겠습니까?')) {
+                      const toRemove = allPositions
+                        .filter(p => p.state === 'CLOSED' || p.state === 'SKIPPED')
+                        .map(p => p.code);
+                      if (toRemove.length > 0) {
+                        fetch('/api/auto-trading/positions/remove', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ codes: toRemove })
+                        }).then(() => fetchStatus());
+                      }
+                    }
+                  }}
+                  className="text-xs px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
+                >
+                  완료된 종목 정리
+                </button>
+                <button
+                  onClick={() => {
+                    if (confirm('모든 종목을 삭제하시겠습니까? (보유 중인 종목은 먼저 청산해야 합니다)')) {
+                      // ENTERED 상태만 제한 (EXIT_PENDING은 오류로 인해 청산 완료된 경우가 있음)
+                      const hasEntered = allPositions.some(p => p.state === 'ENTERED');
+                      if (hasEntered) {
+                        alert('보유 중인 종목이 있습니다. 먼저 청산을 완료하세요.');
+                        return;
+                      }
+                      fetch('/api/auto-trading/positions/clear', {
+                        method: 'POST'
+                      }).then(() => fetchStatus());
+                    }
+                  }}
+                  className="text-xs px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/40 text-rose-400 hover:text-rose-300 transition-colors"
+                >
+                  전체 삭제
+                </button>
+              </div>
+            )}
+          </div>
           {/* 상태별 요약 */}
           <div className="flex flex-wrap gap-2 text-xs">
             {watchingPositions.length > 0 && (
@@ -1313,31 +1997,51 @@ export const AutoTradingPage: React.FC = () => {
                         )}
                       </td>
                       <td className="py-3 px-4 text-center">
-                        {(pos.state === 'WATCHING' || pos.state === 'IDLE') && (
-                          <button
-                            onClick={() => {
-                              setManualCode(pos.code);
-                              setUseAutoQuantity(true);  // 자동 수량 활성화
-                              setManualQuantity('');
-                            }}
-                            disabled={isTradingDay === false}
-                            className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            수동매수
-                          </button>
-                        )}
-                        {pos.state === 'ENTERED' && (
-                          <button
-                            onClick={() => handleManualSell(pos.code, 0)}
-                            disabled={isTradingDay === false}
-                            className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                          >
-                            청산
-                          </button>
-                        )}
-                        {pos.state === 'ERROR' && (
-                          <span className="text-xs text-rose-400">확인필요</span>
-                        )}
+                        <div className="flex items-center justify-center gap-1">
+                          {(pos.state === 'WATCHING' || pos.state === 'IDLE') && (
+                            <button
+                              onClick={() => {
+                                setManualCode(pos.code);
+                                setUseAutoQuantity(true);  // 자동 수량 활성화
+                                setManualQuantity('');
+                              }}
+                              disabled={isTradingDay === false}
+                              className="bg-point-cyan/10 hover:bg-point-cyan text-point-cyan hover:text-white border border-point-cyan/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              수동매수
+                            </button>
+                          )}
+                          {pos.state === 'ENTERED' && (
+                            <button
+                              onClick={() => handleManualSell(pos.code, 0)}
+                              disabled={isTradingDay === false}
+                              className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                              청산
+                            </button>
+                          )}
+                          {pos.state === 'ERROR' && (
+                            <span className="text-xs text-rose-400">확인필요</span>
+                          )}
+                          {/* 삭제 버튼 - 보유 중이 아닌 종목만 (EXIT_PENDING은 오류로 청산완료 가능) */}
+                          {pos.state !== 'ENTERED' && pos.state !== 'ENTRY_PENDING' && (
+                            <button
+                              onClick={() => {
+                                if (confirm(`${pos.name || pos.code} 종목을 목록에서 삭제하시겠습니까?`)) {
+                                  fetch('/api/auto-trading/positions/remove', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ codes: [pos.code] })
+                                  }).then(() => fetchStatus());
+                                }
+                              }}
+                              className="text-slate-500 hover:text-rose-400 p-1 transition-colors"
+                              title="목록에서 삭제"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );

@@ -107,7 +107,7 @@ def get_korean_holidays(year: int) -> set:
 
 
 def is_trading_day(check_date: date = None) -> bool:
-    """거래일 여부 확인 (주말 및 휴장일 체크)"""
+    """거래일 여부 확인 (주말 체크)"""
     if check_date is None:
         check_date = date.today()
     
@@ -115,11 +115,7 @@ def is_trading_day(check_date: date = None) -> bool:
     if check_date.weekday() >= 5:  # 토(5), 일(6)
         return False
     
-    # 휴장일 체크
-    holidays = get_korean_holidays(check_date.year)
-    if check_date.strftime('%Y-%m-%d') in holidays:
-        return False
-    
+    # 휴장일 체크를 시스템이 스스로 하지 않도록 함 (사용자 요청)
     return True
 
 
@@ -1697,7 +1693,7 @@ class AutoTradingEngine:
         if not is_trading_day(now.date()):
             return StrategyPhase.IDLE
         
-        if current_time < "08:40":
+        if current_time < "08:30":
             return StrategyPhase.IDLE
         elif current_time < "09:00":
             return StrategyPhase.PREPARING
