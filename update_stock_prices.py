@@ -1258,7 +1258,7 @@ def update_recommendations():
         req_filter = (request.args.get('filter') or 'both').lower()
         model_name = (request.args.get('model') or 'model1').lower()
         
-        send_ntfy_notification(f"수동 AI 예측 시작 (모델: {model_name})")
+        send_ntfy_notification(f"수동 AI 예측 시작 (모델: {model_name})", topic="wayne-predmodelstocks")
 
         allowed_models = {'model1', 'model5'}
         if model_name not in allowed_models:
@@ -1363,12 +1363,15 @@ def update_recommendations():
                 model_stocks = []
                 for _, row in top_candidates.iterrows():
                     code = str(row['code']).zfill(6)
-                    model_stocks.append(name_map.get(code, code))
+                    name = name_map.get(code, code)
+                    prob = row.get('positive_proba', 0) * 100
+                    vol_ratio = row.get('volume_ratio_5d', 0) * 100
+                    model_stocks.append(f"{name}({prob:.0f}%,거{vol_ratio:.0f}%)")
                 if model_stocks:
                     notification_msg.append(f"[{model_name}] 수동 예측 완료: {', '.join(model_stocks)}")
         
         if notification_msg:
-            send_ntfy_notification("\n".join(notification_msg))
+            send_ntfy_notification("\n".join(notification_msg), topic="wayne-predmodelstocks")
 
         return jsonify({"message": "Prediction complete", "summary": summary})
         
@@ -2160,6 +2163,10 @@ def get_kis_investor_trends(code):
 def get_trades(stock_id):
     """특정 주식의 매매 내역 조회"""
     try:
+        # temp_ 로 시작하는 임시 ID 처리
+        if str(stock_id).lower().startswith('temp_'):
+            return jsonify([])
+
         trades = Trade.query.filter_by(stock_id=stock_id).order_by(Trade.trade_date.desc()).all()
         result = []
         for t in trades:
@@ -2266,9 +2273,33 @@ def delete_trade(trade_id):
 def get_stock_returns(stock_id):
     """특정 주식의 수익률 계산"""
     try:
+        # temp_ 로 시작하는 임시 ID 처리
+        if str(stock_id).lower().startswith('temp_'):
+            return jsonify({
+                "current_price": 0,
+                "avg_buy_price": 0,
+                "remaining_quantity": 0,
+                "invested_amount": 0,
+                "current_value": 0,
+                "realized_profit": 0,
+                "unrealized_profit": 0,
+                "total_profit": 0,
+                "return_rate": 0
+            })
+
         stock = Stock.query.get(stock_id)
         if not stock:
-            return jsonify({"error": "주식을 찾을 수 없습니다"}), 404
+            return jsonify({
+                "current_price": 0,
+                "avg_buy_price": 0,
+                "remaining_quantity": 0,
+                "invested_amount": 0,
+                "current_value": 0,
+                "realized_profit": 0,
+                "unrealized_profit": 0,
+                "total_profit": 0,
+                "return_rate": 0
+            }), 200 # 404 대신 빈 데이터 반환
         
         trades = Trade.query.filter_by(stock_id=stock_id).order_by(Trade.trade_date).all()
         
@@ -2834,11 +2865,11 @@ def check_network_and_retry(max_retries: int = 3, delay: int = 10) -> bool:
     return False
 
 
-def send_ntfy_notification(message):
+def send_ntfy_notification(message, topic="wayne-akdlrjf0924"):
     """ntfy.sh를 통해 알림 전송"""
-    print(f"[Ntfy] Attempting to send message: {message[:50]}...")
+    print(f"[Ntfy] Attempting to send message: {message[:50]}... (Topic: {topic})")
     try:
-        topic_url = "https://ntfy.sh/wayne-akdlrjf0924"
+        topic_url = f"https://ntfy.sh/{topic}"
         # 헤더에 한글이 포함되면 latin-1 인코딩 에러가 발생하므로 제거하거나 인코딩 필요
         resp = requests.post(topic_url, 
                       data=message.encode('utf-8'),
@@ -3211,7 +3242,9 @@ def run_inference_for_models():
                     for _, row in top_candidates.iterrows():
                         code = str(row['code']).zfill(6)
                         name = name_map.get(code, code)
-                        model_stocks.append(name)
+                        prob = row.get('positive_proba', 0) * 100
+                        vol_ratio = row.get('volume_ratio_5d', 0) * 100
+                        model_stocks.append(f"{name}({prob:.0f}%,거{vol_ratio:.0f}%)")
                         rec = Recommendation(
                             date=base_date_str,
                             filter_tag='filter2',
@@ -3236,7 +3269,7 @@ def run_inference_for_models():
             _scheduler_state["inference_done_today"] = True
         
         if notification_msg:
-            send_ntfy_notification("\n".join(notification_msg))
+            send_ntfy_notification("\n".join(notification_msg), topic="wayne-predmodelstocks")
             
         print("[Scheduler] All inference completed.")
         
@@ -3374,7 +3407,7 @@ def trigger_scheduler_task():
         threading.Thread(target=run_crawl_intraday, daemon=True).start()
         return jsonify({"message": "Intraday crawl started."})
     elif task == 'inference':
-        send_ntfy_notification("수동 AI 예측 시작")
+        send_ntfy_notification("수동 AI 예측 시작", topic="wayne-predmodelstocks")
         threading.Thread(target=run_inference_for_models, daemon=True).start()
         return jsonify({"message": "Inference started."})
     else:
@@ -4070,13 +4103,27 @@ def api_auto_trading_manual_buy():
     try:
         data = request.get_json() or {}
         code = str(data.get('code', '')).zfill(6)
+        codes = data.get('codes', [])
         quantity = int(data.get('quantity', 0))  # 0이면 자동 계산
         use_auto_quantity = data.get('auto_quantity', False) or quantity == 0
         
-        if not code:
+        engine = get_auto_trading_engine()
+
+        if codes:  # 일괄 매수
+            results = []
+            for c in codes:
+                c_str = str(c).zfill(6)
+                # 이미 보유중이거나 주문대기중인 종목 제외
+                pos = engine.state.positions.get(c_str)
+                if pos and pos.state in (PositionState.ENTERED, PositionState.ENTRY_PENDING):
+                    continue
+                res = engine.manual_buy(c_str, 0, auto_quantity=True)
+                results.append({"code": c_str, "result": res})
+            return jsonify({"success": True, "results": results})
+            
+        if not code or code == '000000':
             return jsonify({"success": False, "error": "종목코드가 필요합니다."}), 400
         
-        engine = get_auto_trading_engine()
         result = engine.manual_buy(code, quantity, auto_quantity=use_auto_quantity)
         
         if 'error' in result:
@@ -4093,12 +4140,22 @@ def api_auto_trading_manual_sell():
     try:
         data = request.get_json() or {}
         code = str(data.get('code', '')).zfill(6)
+        codes = data.get('codes', [])
         quantity = int(data.get('quantity', 0))  # 0이면 전량
         
-        if not code:
+        engine = get_auto_trading_engine()
+        
+        if codes:  # 일괄 매도
+            results = []
+            for c in codes:
+                c_str = str(c).zfill(6)
+                res = engine.manual_sell(c_str, 0)
+                results.append({"code": c_str, "result": res})
+            return jsonify({"success": True, "results": results})
+            
+        if not code or code == '000000':
             return jsonify({"success": False, "error": "종목코드가 필요합니다."}), 400
         
-        engine = get_auto_trading_engine()
         result = engine.manual_sell(code, quantity)
         
         if 'error' in result:
@@ -4327,21 +4384,23 @@ def api_auto_trading_config():
     try:
         engine = get_auto_trading_engine()
         config = engine.config
+        
+        # StrategyConfig 클래스의 대문자 속성 사용 (개편된 엔진 환경에 맞춤)
         return jsonify({
             "success": True,
             "config": {
-                "upper_limit_rate": config.UPPER_LIMIT_RATE,
-                "min_market_cap": config.MIN_MARKET_CAP,
-                "gap_threshold": config.GAP_THRESHOLD,
-                "gap_confirm_count": config.GAP_CONFIRM_COUNT,
-                "entry_start_time": config.ENTRY_START_TIME,
-                "entry_end_time": config.ENTRY_END_TIME,
-                "take_profit_rate": config.TAKE_PROFIT_RATE,
-                "stop_loss_rate": config.STOP_LOSS_RATE,
-                "eod_sell_start": config.EOD_SELL_START,
-                "eod_sell_end": config.EOD_SELL_END,
-                "max_daily_loss_rate": config.MAX_DAILY_LOSS_RATE,
-                "max_positions": config.MAX_POSITIONS
+                "upper_limit_rate": getattr(config, 'UPPER_LIMIT_RATE', 30.0),
+                "min_market_cap": getattr(config, 'MIN_MARKET_CAP', 0),
+                "gap_threshold": getattr(config, 'GAP_THRESHOLD', 2.0),
+                "gap_confirm_count": getattr(config, 'GAP_CONFIRM_COUNT', 2),
+                "entry_start_time": getattr(config, 'ENTRY_START_TIME', '09:00'),
+                "entry_end_time": getattr(config, 'ENTRY_END_TIME', '15:00'),
+                "take_profit_rate": getattr(config, 'TAKE_PROFIT_RATE', 10.0),
+                "stop_loss_rate": getattr(config, 'STOP_LOSS_RATE', -3.0),
+                "eod_sell_start": getattr(config, 'EOD_SELL_START', '15:15'),
+                "eod_sell_end": getattr(config, 'EOD_SELL_END', '15:28'),
+                "max_daily_loss_rate": getattr(config, 'MAX_DAILY_LOSS_RATE', -5.0),
+                "max_positions": getattr(config, 'MAX_POSITIONS', 10)
             }
         })
     except Exception as e:
@@ -4371,6 +4430,8 @@ def api_auto_trading_update_config():
             engine.config.ENTRY_START_TIME = str(data['entry_start_time'])
         if 'entry_end_time' in data:
             engine.config.ENTRY_END_TIME = str(data['entry_end_time'])
+        if 'upper_limit_rate' in data:
+            engine.config.UPPER_LIMIT_RATE = float(data['upper_limit_rate'])
             
         return jsonify({
             "success": True,
@@ -4380,7 +4441,8 @@ def api_auto_trading_update_config():
                 "take_profit_rate": engine.config.TAKE_PROFIT_RATE,
                 "stop_loss_rate": engine.config.STOP_LOSS_RATE,
                 "gap_threshold": engine.config.GAP_THRESHOLD,
-                "min_market_cap": engine.config.MIN_MARKET_CAP
+                "min_market_cap": engine.config.MIN_MARKET_CAP,
+                "upper_limit_rate": getattr(engine.config, 'UPPER_LIMIT_RATE', 29.5)
             }
         })
     except Exception as e:
@@ -4456,6 +4518,16 @@ def api_auto_trading_settings_set():
                 db.session.add(new_setting)
         
         db.session.commit()
+        
+        # 엔진 인스턴스가 동작 중이면 설정값 리로드
+        try:
+            engine = get_auto_trading_engine()
+            if engine:
+                print("엔진 설정을 리로드합니다...")
+                engine._load_config_from_db()
+        except Exception as ee:
+            print(f"엔진 설정 리로드 중 오류: {ee}")
+
         return jsonify({"success": True, "message": "설정이 저장되었습니다."})
     except Exception as e:
         print(f"자동매매 설정 저장 오류: {e}")
@@ -4493,71 +4565,132 @@ def api_get_target_stocks():
 
 @app.route('/api/auto-trading/target-stocks', methods=['POST'])
 def api_add_target_stocks():
-    """자동매매 대상 종목 추가"""
+    """자동매매 대상 종목 추가 (엔진 Universe에 직접 추가)"""
     try:
+        from auto_trading_strategy1 import UniverseStock, Position, PositionState
+        
         data = request.get_json()
         stocks = data.get('stocks', [])
         
+        engine = get_auto_trading_engine()
         added_count = 0
+        
         for stock in stocks:
             code = stock.get('code')
             if not code:
                 continue
             
-            # 이미 존재하는지 확인
+            name = stock.get('name', '')
+            base_price = stock.get('basePrice', 0) or 0
+            market_cap = stock.get('marketCap', 0) or 0
+            
+            # 1. DB에 저장 (백업용)
             existing = AutoTradingTargetStock.query.filter_by(code=code).first()
             if existing:
-                # 이미 있으면 업데이트
-                existing.name = stock.get('name', existing.name)
-                existing.base_price = stock.get('basePrice', existing.base_price)
-                existing.current_price = stock.get('currentPrice', existing.current_price)
-                existing.market_cap = stock.get('marketCap', existing.market_cap)
-                existing.source = stock.get('source', existing.source)
-                existing.probability = stock.get('probability', existing.probability)
-                existing.model_name = stock.get('modelName', existing.model_name)
+                existing.name = name
+                existing.base_price = base_price
+                existing.current_price = stock.get('currentPrice')
+                existing.market_cap = market_cap
+                existing.source = stock.get('source')
+                existing.probability = stock.get('probability')
+                existing.model_name = stock.get('modelName')
             else:
-                # 새로 추가
                 new_stock = AutoTradingTargetStock(
                     code=code,
-                    name=stock.get('name', ''),
-                    base_price=stock.get('basePrice'),
+                    name=name,
+                    base_price=base_price,
                     current_price=stock.get('currentPrice'),
-                    market_cap=stock.get('marketCap'),
+                    market_cap=market_cap,
                     source=stock.get('source'),
                     probability=stock.get('probability'),
                     model_name=stock.get('modelName'),
                     added_date=stock.get('addedDate', datetime.now().isoformat()),
                 )
                 db.session.add(new_stock)
+            
+            # 2. 엔진 Universe에 직접 추가
+            # 이미 존재하는지 확인
+            existing_in_universe = any(u.code == code for u in engine.state.universe)
+            if not existing_in_universe:
+                universe_stock = UniverseStock(
+                    code=code,
+                    name=name,
+                    prev_close=base_price,
+                    prev_high=0.0,
+                    change_rate=0.0,
+                    market_cap=market_cap,
+                    added_date=datetime.now().strftime('%Y-%m-%d')
+                )
+                engine.state.universe.append(universe_stock)
                 added_count += 1
+            
+            # 3. Position 초기화 (WATCHING 상태로)
+            if code not in engine.state.positions:
+                engine.state.positions[code] = Position(
+                    code=code,
+                    name=name,
+                    state=PositionState.WATCHING,
+                    prev_close=base_price,
+                    market_cap=market_cap
+                )
         
         db.session.commit()
-        return jsonify({"success": True, "added": added_count})
+        engine._save_state()
+        
+        return jsonify({
+            "success": True, 
+            "added": added_count,
+            "universe_count": len(engine.state.universe),
+            "positions_count": len(engine.state.positions)
+        })
     except Exception as e:
         print(f"자동매매 대상 종목 추가 오류: {e}")
+        import traceback
+        traceback.print_exc()
         db.session.rollback()
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 @app.route('/api/auto-trading/target-stocks', methods=['DELETE'])
 def api_delete_target_stocks():
-    """자동매매 대상 종목 삭제"""
+    """자동매매 대상 종목 삭제 (엔진 Universe에서도 제거)"""
     try:
+        from auto_trading_strategy1 import PositionState
+        
         data = request.get_json()
         codes = data.get('codes', [])
         
         if not codes:
             return jsonify({"success": False, "error": "codes required"}), 400
         
+        engine = get_auto_trading_engine()
         deleted_count = 0
+        
         for code in codes:
+            # 1. DB에서 삭제
             stock = AutoTradingTargetStock.query.filter_by(code=code).first()
             if stock:
                 db.session.delete(stock)
-                deleted_count += 1
+            
+            # 2. 엔진 Universe에서 제거
+            engine.state.universe = [u for u in engine.state.universe if u.code != code]
+            
+            # 3. Position에서 제거 (보유 중이 아닌 경우만)
+            if code in engine.state.positions:
+                pos = engine.state.positions[code]
+                if pos.state not in [PositionState.ENTERED, PositionState.ENTRY_PENDING, PositionState.EXIT_PENDING]:
+                    del engine.state.positions[code]
+            
+            deleted_count += 1
         
         db.session.commit()
-        return jsonify({"success": True, "deleted": deleted_count})
+        engine._save_state()
+        
+        return jsonify({
+            "success": True, 
+            "deleted": deleted_count,
+            "universe_count": len(engine.state.universe)
+        })
     except Exception as e:
         print(f"자동매매 대상 종목 삭제 오류: {e}")
         db.session.rollback()
@@ -4566,11 +4699,33 @@ def api_delete_target_stocks():
 
 @app.route('/api/auto-trading/target-stocks/clear', methods=['DELETE'])
 def api_clear_target_stocks():
-    """자동매매 대상 종목 전체 삭제"""
+    """자동매매 대상 종목 전체 삭제 (엔진 Universe도 초기화)"""
     try:
+        from auto_trading_strategy1 import PositionState
+        
+        engine = get_auto_trading_engine()
+        
+        # 1. DB 전체 삭제
         deleted_count = AutoTradingTargetStock.query.delete()
+        
+        # 2. 엔진 Universe 초기화
+        engine.state.universe = []
+        
+        # 3. 보유 중이 아닌 Position 제거
+        positions_to_keep = {}
+        for code, pos in engine.state.positions.items():
+            if pos.state in [PositionState.ENTERED, PositionState.ENTRY_PENDING, PositionState.EXIT_PENDING]:
+                positions_to_keep[code] = pos
+        engine.state.positions = positions_to_keep
+        
         db.session.commit()
-        return jsonify({"success": True, "deleted": deleted_count})
+        engine._save_state()
+        
+        return jsonify({
+            "success": True, 
+            "deleted": deleted_count,
+            "universe_count": 0
+        })
     except Exception as e:
         print(f"자동매매 대상 종목 전체 삭제 오류: {e}")
         db.session.rollback()

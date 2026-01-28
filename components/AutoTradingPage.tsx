@@ -157,7 +157,7 @@ interface AutoTradingSettings {
 
 // 포맷 함수
 const formatPrice = (price: number) => {
-  return new Intl.NumberFormat('ko-KR').format(price);
+  return new Intl.NumberFormat('ko-KR', { maximumFractionDigits: 0 }).format(Math.floor(price));
 };
 
 const formatPercent = (rate: number) => {
@@ -393,9 +393,24 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
     }
   }, [tradingStocks, onStocksChange]);
 
-  // 전략 설정 변경시 저장
+  // 전략 설정 변경시 저장 (로컬 + 서버)
   useEffect(() => {
     saveTradingStrategy(strategyConfig);
+    
+    // 서버에도 저장 (키: trading_strategy_config)
+    const saveToServer = async () => {
+      try {
+        await fetch(`${API_BASE_URL}/auto-trading/settings`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 'trading_strategy_config': strategyConfig }),
+        });
+      } catch (e) {
+        console.error('전략 설정 서버 저장 실패:', e);
+      }
+    };
+    
+    saveToServer();
   }, [strategyConfig]);
 
   // Heartbeat 조회 (엔진 실행 여부 신뢰성 확인)
@@ -567,6 +582,35 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
   // 전략 설정 업데이트 핸들러
   const handleUpdateStrategy = (updates: Partial<TradingStrategyConfig>) => {
     setStrategyConfig(prev => ({ ...prev, ...updates }));
+  };
+
+  // 매수 시간 추가
+  const handleAddBuyTime = () => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      buyTimeConfigs: [
+        ...prev.buyTimeConfigs,
+        { time: '09:00', enabled: true, orderMethod: 'market' }
+      ]
+    }));
+  };
+
+  // 매수 시간 삭제
+  const handleRemoveBuyTime = (index: number) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      buyTimeConfigs: prev.buyTimeConfigs.filter((_, i) => i !== index)
+    }));
+  };
+
+  // 매수 시간 변경
+  const handleChangeBuyTime = (index: number, time: string) => {
+    setStrategyConfig(prev => ({
+      ...prev,
+      buyTimeConfigs: prev.buyTimeConfigs.map((config, i) => 
+        i === index ? { ...config, time } : config
+      )
+    }));
   };
 
   // 매수 시간 설정 토글
@@ -853,25 +897,64 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
     }
   };
 
-  // 수동 매도
-  const handleManualSell = async (code: string, quantity: number = 0) => {
-    if (!window.confirm(`${code} 종목을 ${quantity > 0 ? quantity + '주' : '전량'} 매도하시겠습니까?`)) return;
+  // 수동 매도 (일괄 매도 포함)
+  const handleManualSell = async (code: string | string[], quantity: number = 0) => {
+    const isBulk = Array.isArray(code);
+    const confirmMsg = isBulk 
+      ? `보유 중인 모든 종목(${code.length}개)을 전량 매도하시겠습니까?`
+      : `${code} 종목을 ${quantity > 0 ? quantity + '주' : '전량'} 매도하시겠습니까?`;
+      
+    if (!window.confirm(confirmMsg)) return;
     
     try {
       const response = await fetch(`${API_BASE_URL}/auto-trading/manual-sell`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ code, quantity })
+        body: JSON.stringify(isBulk ? { codes: code } : { code, quantity })
       });
       const data = await response.json();
       if (data.success) {
-        alert(`매도 주문 완료: ${data.order_no}`);
+        alert(isBulk ? '일괄 매도 주문이 완료되었습니다.' : `매도 주문 완료: ${data.order_no}`);
         fetchStatus();
       } else {
         alert(data.error || '매도 실패');
       }
     } catch (err) {
       alert('서버 연결 실패');
+    }
+  };
+
+  // 일괄 매수
+  const handleBulkBuy = async () => {
+    const watchingCodes = watchingPositions.map(p => p.code);
+    if (watchingCodes.length === 0) {
+      alert('매수 가능한 감시 중인 종목이 없습니다.');
+      return;
+    }
+
+    if (!window.confirm(`감시 중인 모든 종목(${watchingCodes.length}개)을 일괄 매수하시겠습니까? (자동 수량 계산)`)) return;
+
+    setIsOrdering(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/manual-buy`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          codes: watchingCodes,
+          auto_quantity: true
+        })
+      });
+      const data = await response.json();
+      if (data.success) {
+        alert(`${watchingCodes.length}개 종목에 대한 일괄 매수 주문을 시도했습니다.`);
+        fetchStatus();
+      } else {
+        alert(data.error || '일괄 매수 실패');
+      }
+    } catch (err) {
+      alert('서버 연결 실패');
+    } finally {
+      setIsOrdering(false);
     }
   };
 
@@ -1021,7 +1104,19 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
               {isEngineRunning ? (
                 <>
                   <Wifi className="w-5 h-5 text-emerald-400 animate-pulse" />
-                  <span className="text-emerald-400 font-bold">엔진 동작중</span>
+                  <span className="text-emerald-400 font-bold">
+                    엔진 동작중
+                    {status?.phase && (
+                      <span className="ml-2 px-2 py-0.5 bg-emerald-500/20 rounded text-xs">
+                        {status.phase === 'IDLE' ? '대기' :
+                         status.phase === 'PREPARING' ? '준비중' :
+                         status.phase === 'ENTRY_WINDOW' ? '매수요청' :
+                         status.phase === 'MONITORING' ? (activePositions.length > 0 ? '매수완료' : '모니터링') :
+                         status.phase === 'EOD_CLOSING' ? '청산준비중' :
+                         status.phase === 'CLOSED' ? '전략수행완료' : status.phase}
+                      </span>
+                    )}
+                  </span>
                 </>
               ) : heartbeat?.is_running && !isEngineResponsive ? (
                 <>
@@ -1155,14 +1250,6 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
         >
           <Settings className="w-4 h-4" />
           매매 전략 설정
-        </button>
-        
-        <button
-          onClick={() => setShowConfig(!showConfig)}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-500/10 border border-slate-500/30 text-slate-400 hover:bg-slate-500/20 transition-all text-sm font-bold"
-        >
-          <Settings className="w-4 h-4" />
-          기존 전략
         </button>
         
         <button
@@ -1324,73 +1411,70 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
           <div className="mb-6">
             <h4 className="text-sm font-bold text-slate-300 mb-3 flex items-center gap-2">
               <ShoppingCart className="w-4 h-4 text-point-cyan" />
-              매수 기준 및 방법
+              매수 시간 설정
             </h4>
             <div className="bg-slate-800/50 rounded-xl p-4">
-              <p className="text-xs text-slate-400 mb-4">각 시간대별로 매수 주문 방법을 설정할 수 있습니다.</p>
+              <p className="text-xs text-slate-400 mb-4">매수할 시간을 자유롭게 추가/삭제할 수 있습니다. (24시간 형식, HH:MM)</p>
               <div className="space-y-3">
                 {strategyConfig.buyTimeConfigs.map((timeConfig, idx) => (
-                  <div key={idx} className="flex items-center gap-4 flex-wrap">
+                  <div key={idx} className="flex items-center gap-3 flex-wrap">
                     {/* 활성화 토글 */}
                     <button
                       onClick={() => handleToggleBuyTime(idx)}
-                      className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-bold transition-all min-w-[100px] ${
+                      className={`p-2 rounded-lg transition-all ${
                         timeConfig.enabled
                           ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
                           : 'bg-slate-700 text-slate-400 border border-slate-600'
                       }`}
+                      title={timeConfig.enabled ? '비활성화' : '활성화'}
                     >
                       {timeConfig.enabled ? <ToggleRight className="w-4 h-4" /> : <ToggleLeft className="w-4 h-4" />}
-                      {timeConfig.time}
                     </button>
                     
-                    {/* 매수 방법 선택 */}
-                    <div className="flex gap-2">
-                      <button
-                        onClick={() => handleChangeBuyMethod(idx, 'market')}
-                        disabled={!timeConfig.enabled}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
-                          timeConfig.orderMethod === 'market'
-                            ? 'bg-point-cyan text-white'
-                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                        }`}
-                      >
-                        시장가
-                      </button>
-                      <button
-                        onClick={() => handleChangeBuyMethod(idx, 'open_price')}
-                        disabled={!timeConfig.enabled}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
-                          timeConfig.orderMethod === 'open_price'
-                            ? 'bg-point-cyan text-white'
-                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                        }`}
-                      >
-                        시가 지정가
-                      </button>
-                      <button
-                        onClick={() => handleChangeBuyMethod(idx, 'ask_plus_2tick')}
-                        disabled={!timeConfig.enabled}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all disabled:opacity-50 ${
-                          timeConfig.orderMethod === 'ask_plus_2tick'
-                            ? 'bg-point-cyan text-white'
-                            : 'bg-slate-700 text-slate-400 hover:bg-slate-600'
-                        }`}
-                      >
-                        ASK+2틱
-                      </button>
-                    </div>
+                    {/* 시간 입력 (시:분) */}
+                    <input
+                      type="time"
+                      value={timeConfig.time}
+                      onChange={(e) => handleChangeBuyTime(idx, e.target.value)}
+                      className="bg-slate-700 text-white px-3 py-2 rounded-lg text-sm font-mono border border-slate-600 focus:border-violet-500 focus:outline-none"
+                    />
                     
-                    {/* 시간대 설명 */}
-                    <span className="text-xs text-slate-500">
-                      {idx === 0 && '(프리마켓 동시호가)'}
-                      {idx === 1 && '(정규장 시작)'}
-                      {idx === 2 && '(장중)'}
-                      {idx === 3 && '(종가 동시호가)'}
-                    </span>
+                    {/* 매수 방법 선택 */}
+                    <select
+                      value={timeConfig.orderMethod}
+                      onChange={(e) => handleChangeBuyMethod(idx, e.target.value as BuyTimeConfig['orderMethod'])}
+                      disabled={!timeConfig.enabled}
+                      className="bg-slate-700 text-white px-3 py-2 rounded-lg text-sm border border-slate-600 focus:border-violet-500 focus:outline-none disabled:opacity-50"
+                    >
+                      <option value="market">시장가</option>
+                      <option value="open_price">시가 지정가</option>
+                      <option value="ask_plus_2tick">ASK+2틱</option>
+                    </select>
+                    
+                    {/* 삭제 버튼 */}
+                    <button
+                      onClick={() => handleRemoveBuyTime(idx)}
+                      className="p-2 rounded-lg bg-rose-500/20 text-rose-400 hover:bg-rose-500/30 transition-all"
+                      title="삭제"
+                    >
+                      <Trash2 className="w-4 h-4" />
+                    </button>
                   </div>
                 ))}
+                
+                {/* 시간 추가 버튼 */}
+                <button
+                  onClick={handleAddBuyTime}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-500/20 text-violet-400 hover:bg-violet-500/30 border border-violet-500/30 transition-all text-sm font-bold"
+                >
+                  <PlusCircle className="w-4 h-4" />
+                  매수 시간 추가
+                </button>
               </div>
+              
+              {strategyConfig.buyTimeConfigs.length === 0 && (
+                <p className="text-amber-400 text-xs mt-2">⚠️ 매수 시간이 설정되지 않았습니다. 최소 1개 이상의 시간을 추가해주세요.</p>
+              )}
             </div>
           </div>
           
@@ -1502,96 +1586,6 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
         </div>
       )}
 
-      {/* 전략 설정 패널 */}
-      {showConfig && config && (
-        <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-4 mb-6 animate-in slide-in-from-top-2 duration-200">
-          <h3 className="text-white font-bold mb-4 flex items-center gap-2">
-            <Settings className="w-5 h-5 text-point-cyan" />
-            기존 전략 설정 (전략1: 상한가 갭상승)
-          </h3>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-            <div>
-              <span className="text-slate-500">상한가 기준</span>
-              <p className="text-white font-bold">{config.upper_limit_rate}%</p>
-            </div>
-            <div>
-              <span className="text-slate-500">최소 시총</span>
-              <p className="text-white font-bold">{config.min_market_cap}억</p>
-            </div>
-            <div>
-              <span className="text-slate-500">갭 기준</span>
-              <p className="text-white font-bold">+{config.gap_threshold}%</p>
-            </div>
-            <div>
-              <span className="text-slate-500">갭 확인</span>
-              <p className="text-white font-bold">{config.gap_confirm_count}회</p>
-            </div>
-            <div>
-              <span className="text-slate-500">익절</span>
-              <p className="text-emerald-400 font-bold">+{config.take_profit_rate}%</p>
-            </div>
-            <div>
-              <span className="text-slate-500">손절</span>
-              <p className="text-rose-400 font-bold">{config.stop_loss_rate}%</p>
-            </div>
-            <div>
-              <span className="text-slate-500">최대 포지션</span>
-              <p className="text-white font-bold">{config.max_positions}개</p>
-            </div>
-            <div>
-              <span className="text-slate-500">종목당 투자비율</span>
-              <p className="text-point-cyan font-bold">1/{config.max_positions} (= {(100 / config.max_positions).toFixed(1)}%)</p>
-            </div>
-          </div>
-          
-          {/* 설정 수정 폼 */}
-          <div className="mt-4 pt-4 border-t border-slate-700">
-            <h4 className="text-sm text-slate-400 mb-3">설정 변경</h4>
-            <div className="flex flex-wrap items-end gap-3">
-              <div className="min-w-[100px]">
-                <label className="text-xs text-slate-500 mb-1 block">최대 포지션</label>
-                <input
-                  type="number"
-                  value={editMaxPositions}
-                  onChange={(e) => setEditMaxPositions(e.target.value)}
-                  min="1"
-                  max="10"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
-                />
-              </div>
-              <div className="min-w-[100px]">
-                <label className="text-xs text-slate-500 mb-1 block">익절 (%)</label>
-                <input
-                  type="number"
-                  value={editTakeProfit}
-                  onChange={(e) => setEditTakeProfit(e.target.value)}
-                  step="0.5"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
-                />
-              </div>
-              <div className="min-w-[100px]">
-                <label className="text-xs text-slate-500 mb-1 block">손절 (%)</label>
-                <input
-                  type="number"
-                  value={editStopLoss}
-                  onChange={(e) => setEditStopLoss(e.target.value)}
-                  step="0.5"
-                  className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm focus:outline-none focus:border-point-cyan"
-                />
-              </div>
-              <button
-                onClick={handleUpdateConfig}
-                disabled={isUpdatingConfig}
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-point-cyan text-white font-bold hover:bg-point-cyan/90 transition-all disabled:opacity-50"
-              >
-                {isUpdatingConfig ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                적용
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
       {/* 거래 내역 패널 */}
       {showHistory && (
         <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl p-4 mb-6 animate-in slide-in-from-top-2 duration-200">
@@ -1676,6 +1670,15 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
             <TrendingUp className="w-5 h-5 text-emerald-400" />
             보유 포지션 ({activePositions.length})
           </h3>
+          {activePositions.length > 0 && (
+            <button
+              onClick={() => handleManualSell(activePositions.map(p => p.code))}
+              className="bg-rose-500/20 hover:bg-rose-500 text-rose-400 hover:text-white px-3 py-1.5 rounded-lg text-sm font-bold transition-all flex items-center gap-2"
+            >
+              <ShoppingCart className="w-4 h-4" />
+              일괄매도
+            </button>
+          )}
         </div>
         
         {activePositions.length > 0 ? (
@@ -1688,6 +1691,7 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                   <th className="text-right py-3 px-4">수량</th>
                   <th className="text-right py-3 px-4">진입가</th>
                   <th className="text-right py-3 px-4">현재가</th>
+                  <th className="text-right py-3 px-4">총매수금액</th>
                   <th className="text-right py-3 px-4">손익</th>
                   <th className="text-center py-3 px-4">액션</th>
                 </tr>
@@ -1703,6 +1707,7 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                     <td className="py-3 px-4 text-right text-white">{pos.quantity}주</td>
                     <td className="py-3 px-4 text-right text-slate-400">{formatPrice(pos.entry_price)}원</td>
                     <td className="py-3 px-4 text-right text-white">{formatPrice(pos.current_price)}원</td>
+                    <td className="py-3 px-4 text-right text-slate-300">{formatPrice(pos.entry_price * pos.quantity)}원</td>
                     <td className={`py-3 px-4 text-right font-bold ${pos.unrealized_pnl >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
                       {formatPrice(pos.unrealized_pnl)}원
                       <div className="text-xs">{formatPercent(pos.unrealized_pnl_rate)}</div>
@@ -1727,106 +1732,28 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
         )}
       </div>
 
-      {/* 자동매매 대상 종목 (등록된 종목) */}
-      <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-6 overflow-hidden">
-        <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-          <h3 className="text-white font-bold flex items-center gap-2">
-            <Target className="w-5 h-5 text-violet-400" />
-            자동매매 대상 종목 ({tradingStocks.length})
-          </h3>
-          {tradingStocks.length > 0 && (
-            <button
-              onClick={handleClearAllStocks}
-              className="text-xs text-rose-400 hover:text-rose-300 transition-colors flex items-center gap-1"
-            >
-              <Trash2 className="w-3 h-3" />
-              전체 삭제
-            </button>
-          )}
-        </div>
-        
-        {tradingStocks.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-slate-500 border-b border-slate-800 bg-slate-800/30">
-                  <th className="text-left py-3 px-4">종목</th>
-                  <th className="text-left py-3 px-4">출처</th>
-                  <th className="text-right py-3 px-4">기준가</th>
-                  <th className="text-right py-3 px-4">시총</th>
-                  <th className="text-right py-3 px-4">확률</th>
-                  <th className="text-left py-3 px-4">등록일</th>
-                  <th className="text-center py-3 px-4">액션</th>
-                </tr>
-              </thead>
-              <tbody>
-                {tradingStocks.map((stock) => (
-                  <tr key={stock.code} className="border-b border-slate-800/50 hover:bg-slate-800/30">
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-white">{stock.name}</div>
-                      <div className="text-xs text-slate-500">{stock.code}</div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span className={`px-2 py-0.5 rounded-full text-xs font-bold ${
-                        stock.source === 'manual' 
-                          ? 'bg-slate-500/20 text-slate-400'
-                          : stock.source === 'ai_model1'
-                            ? 'bg-violet-500/20 text-violet-400'
-                            : 'bg-emerald-500/20 text-emerald-400'
-                      }`}>
-                        {stock.source === 'manual' ? '수동' : stock.source === 'ai_model1' ? 'AI M1' : 'AI M2'}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4 text-right text-white">{formatPrice(stock.basePrice)}원</td>
-                    <td className="py-3 px-4 text-right text-slate-400">
-                      {stock.marketCap ? `${(stock.marketCap / 100000000).toFixed(0)}억` : '-'}
-                    </td>
-                    <td className="py-3 px-4 text-right">
-                      {stock.probability ? (
-                        <span className="text-point-cyan font-bold">{(stock.probability * 100).toFixed(1)}%</span>
-                      ) : '-'}
-                    </td>
-                    <td className="py-3 px-4 text-slate-400 text-xs">
-                      {new Date(stock.addedDate).toLocaleDateString('ko-KR')}
-                    </td>
-                    <td className="py-3 px-4 text-center">
-                      <button
-                        onClick={() => handleRemoveStock(stock.code)}
-                        className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <div className="p-8 text-center text-slate-500">
-            <Database className="w-12 h-12 mx-auto mb-3 opacity-30" />
-            <p className="mb-2">등록된 자동매매 종목이 없습니다.</p>
-            <p className="text-xs text-slate-600">
-              "종목 추가" 버튼을 눌러 수동으로 추가하거나,<br/>
-              AI추천 페이지에서 종목을 선택하여 추가하세요.
-            </p>
-          </div>
-        )}
-      </div>
-
-      {/* 전체 종목 상태 */}
+      {/* 전체 종목 상태 (엔진 Universe) */}
       <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl mb-6 overflow-hidden">
         <div className="p-4 border-b border-slate-800 flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
             <h3 className="text-white font-bold flex items-center gap-2">
-              <Eye className="w-5 h-5 text-amber-400" />
-              전체 종목 상태 ({allPositions.length})
+              <Target className="w-5 h-5 text-violet-400" />
+              자동매매 대상 종목 ({allPositions.length})
             </h3>
             {/* 삭제 버튼들 */}
-            {allPositions.length > 0 && (
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => {
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handleBulkBuy}
+                disabled={watchingPositions.length === 0 || isOrdering}
+                className="bg-emerald-500/20 hover:bg-emerald-600 text-emerald-400 hover:text-white px-3 py-1 rounded-lg text-xs font-bold transition-all flex items-center gap-1 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <ShoppingCart className="w-3.5 h-3.5" />
+                일괄매수
+              </button>
+              {allPositions.length > 0 && (
+                <>
+                  <button
+                    onClick={() => {
                     if (confirm('청산 완료 및 건너뜀 종목을 모두 삭제하시겠습니까?')) {
                       const toRemove = allPositions
                         .filter(p => p.state === 'CLOSED' || p.state === 'SKIPPED')
@@ -1845,26 +1772,16 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                   완료된 종목 정리
                 </button>
                 <button
-                  onClick={() => {
-                    if (confirm('모든 종목을 삭제하시겠습니까? (보유 중인 종목은 먼저 청산해야 합니다)')) {
-                      // ENTERED 상태만 제한 (EXIT_PENDING은 오류로 인해 청산 완료된 경우가 있음)
-                      const hasEntered = allPositions.some(p => p.state === 'ENTERED');
-                      if (hasEntered) {
-                        alert('보유 중인 종목이 있습니다. 먼저 청산을 완료하세요.');
-                        return;
-                      }
-                      fetch('/api/auto-trading/positions/clear', {
-                        method: 'POST'
-                      }).then(() => fetchStatus());
-                    }
-                  }}
-                  className="text-xs px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500/40 text-rose-400 hover:text-rose-300 transition-colors"
+                  onClick={handleClearAllStocks}
+                  className="text-xs px-2 py-1 rounded bg-rose-500/20 hover:bg-rose-500 text-rose-400 hover:text-white transition-colors flex items-center gap-1"
                 >
+                  <Trash2 className="w-3 h-3" />
                   전체 삭제
                 </button>
-              </div>
+              </>
             )}
           </div>
+        </div>
           {/* 상태별 요약 */}
           <div className="flex flex-wrap gap-2 text-xs">
             {watchingPositions.length > 0 && (

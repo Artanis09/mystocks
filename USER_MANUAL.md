@@ -29,7 +29,17 @@ pip install -r requirements.txt
 
 ---
 
-## 🔑 2. 보안 및 환경 설정 (.env)
+## � 1-3. 프론트엔드 엔진 업데이트 (Lightweight Charts)
+이 프로젝트는 가독성 높은 금융 차트를 제공하기 위해 Recharts에서 **Lightweight Charts** (TradingView 기술)로 마이그레이션되었습니다.
+
+```bash
+# 새로운 라이브러리 설치 반영을 위해 빌드 필요
+docker compose build frontend
+```
+
+---
+
+## �🔑 2. 보안 및 환경 설정 (.env)
 
 **⚠️ 보안 주의:** API Key는 절대 Git 저장소(Github 등)에 업로드하지 마세요. 이 프로젝트는 `.env` 파일을 통해 키를 안전하게 관리합니다.
 

@@ -48,6 +48,26 @@ docker compose -f docker-compose.prod.yml --profile with-nginx up -d
 
 ## 📁 볼륨 마운트
 
+- `/app/db` - SQLite 데이터베이스 (영속성 유지)
+- `/app/data` - KRX 주식 가격 데이터 (Parquet)
+- `/app/ml/models` - 학습된 ML 모델 파일
+
+## ⚠️ 라이브러리 추가 및 업데이트 시 주의사항
+
+새로운 라이브러리를 추가하거나 버전을 변경할 때, 도커 빌드 과정에서 `npm ci` 단계에서 오류가 발생할 수 있습니다 (lock file 불일치). 이 경우 다음 단계를 수행하세요:
+
+1. **Lock 파일 업데이트**: 호스트 시스템에 Node.js가 없는 경우 도커를 사용하여 업데이트합니다.
+   ```bash
+   docker run --rm -v "${PWD}":/app -w /app node:20-alpine npm install --package-lock-only
+   ```
+2. **이미지 재빌드**:
+   ```bash
+   docker compose build frontend
+   docker compose up -d frontend
+   ```
+
+마찬가지로 파이썬 패키지를 추가한 경우 `Dockerfile.backend` 빌드 시 자동으로 반영되도록 `requirements.txt`를 선제적으로 업데이트하세요.
+
 - `./data` → `/app/data` - 주식 데이터 (Parquet)
 - `db-data` → `/app/db` - SQLite 데이터베이스
 - `./config.ini` → `/app/config.ini` - DART API 설정

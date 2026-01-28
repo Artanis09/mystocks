@@ -1,10 +1,13 @@
 
 
-# Run and deploy your AI Studio app
+# 마이스탁 (MyStocks) - AI 기반 주식 분석 및 추천 시스템
 
-This contains everything you need to run your app locally.
+스마트한 주식 발굴 및 분석 일지 서비스입니다. AI 기반의 종목 추천과 전문적인 캔들 차트를 활용한 대시보드를 제공합니다.
 
-View your app in AI Studio: https://ai.studio/apps/drive/1ul6fjYPAFogIqCVmBKhE7uQW8CNMh5hq
+## ✨ 최근 업데이트
+- **AI 추천 페이지 고도화**: 트레이딩 UI를 제거하고 분석 데이터 중심의 쾌적한 화면 제공
+- **차트 엔진 교체**: 기존 Recharts에서 **Lightweight Charts**로 교체하여 전문적인 차트 분석 기능 강화
+- **차트 렌더링 수정**: 음봉의 바디 표현 오류 수정 및 최신 날짜 자동 스크롤 기능 추가
 
 ## Run Locally
 

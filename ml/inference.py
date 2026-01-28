@@ -251,6 +251,8 @@ def predict_next_day(
     base_cols = ['date', 'code', 'close', 'open', 'volume', 'market_cap']
     if 'return_1d' in df.columns:
         base_cols.append('return_1d')
+    if 'volume_ratio_5d' in df.columns:
+        base_cols.append('volume_ratio_5d')
     result = df[base_cols].copy()
     result['positive_proba'] = positive_proba
     result['expected_return'] = expected_return

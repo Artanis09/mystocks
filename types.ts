@@ -213,10 +213,7 @@ export interface AutoTradingStock {
 // 기본 전략 설정
 export const DEFAULT_TRADING_STRATEGY: TradingStrategyConfig = {
   buyTimeConfigs: [
-    { time: '08:30', enabled: false, orderMethod: 'market' },
-    { time: '09:00', enabled: true, orderMethod: 'open_price' },
-    { time: '15:00', enabled: false, orderMethod: 'market' },
-    { time: '15:20', enabled: false, orderMethod: 'market' },
+    { time: '09:00', enabled: true, orderMethod: 'market' },
   ],
   sellConditions: [
     { type: 'take_profit', enabled: true, value: 10 },      // 익절 +10%

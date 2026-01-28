@@ -1,11 +1,12 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { StockData, StockMemo, CandleData, InvestorTrendData } from '../types';
 import { Button } from './Button';
 import { TradeManager } from './TradeManager';
 import { 
   XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, BarChart, Bar, Cell, LineChart, Line, Legend, AreaChart, Area
 } from 'recharts';
+import { createChart, ColorType, IChartApi, ISeriesApi } from 'lightweight-charts';
 import { ArrowLeft, Plus, Calendar, Trash2, TrendingUp, TrendingDown, Clock, BarChart3, PieChart, Activity, Globe, Zap, ScrollText, CandlestickChart as CandleIcon, MousePointer2, Users2, AlertCircle, DollarSign } from 'lucide-react';
 
 const API_BASE_URL = '/api';
@@ -67,25 +68,6 @@ interface StockDetailProps {
 
 type TimeFrame = '15m' | 'D' | 'W' | 'M';
 
-// 캔들차트 렌더링을 위한 커스텀 Shape
-const Candlestick = (props: any) => {
-  const { x, y, width, height, low, high, open, close } = props;
-  const isUp = close >= open;
-  const color = isUp ? '#22c55e' : '#f43f5e';
-
-  const ratio = height / Math.max(Math.abs(open - close), 0.001);
-  const wickX = x + width / 2;
-  const wickHighY = y + (open > close ? 0 : height) - (high - Math.max(open, close)) * ratio;
-  const wickLowY = y + (open > close ? height : 0) + (Math.min(open, close) - low) * ratio;
-
-  return (
-    <g>
-      <line x1={wickX} y1={wickHighY} x2={wickX} y2={wickLowY} stroke={color} strokeWidth={1.5} />
-      <rect x={x} y={y} width={width} height={Math.max(height, 1)} fill={color} />
-    </g>
-  );
-};
-
 // "조회안됨" 메시지 컴포넌트
 const NoDataMessage: React.FC<{ message?: string }> = ({ message = "조회안됨" }) => (
   <div className="flex flex-col items-center justify-center h-full text-slate-500 py-12">
@@ -97,6 +79,10 @@ const NoDataMessage: React.FC<{ message?: string }> = ({ message = "조회안됨
 export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdate, onDelete }) => {
   const [memoText, setMemoText] = useState('');
   const [timeFrame, setTimeFrame] = useState<TimeFrame>('D');
+  const chartContainerRef = useRef<HTMLDivElement>(null);
+  const chartRef = useRef<IChartApi | null>(null);
+  const candlestickSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const volumeSeriesRef = useRef<ISeriesApi<"Histogram"> | null>(null);
   
   // 실제 데이터 상태
   const [candleData, setCandleData] = useState<any[]>([]);
@@ -111,6 +97,48 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
   const [marginData, setMarginData] = useState<any[]>([]);
   const [marginLoading, setMarginLoading] = useState(true);
   const [marginError, setMarginError] = useState<string | null>(null);
+
+  // 타임프레임에 따른 캔들 데이터 필터링
+  const filteredCandleData = useMemo(() => {
+    if (!candleData.length) return [];
+    
+    if (timeFrame === 'D') {
+      return candleData;
+    } else if (timeFrame === 'W') {
+      // 주봉: 5거래일 단위로 그룹화 (한국 시장)
+      const weekly: any[] = [];
+      for (let i = 0; i < candleData.length; i += 5) {
+        const chunk = candleData.slice(i, i + 5);
+        if (chunk.length === 0) continue;
+        weekly.push({
+          date: chunk[0].date,
+          open: chunk[0].open,
+          close: chunk[chunk.length - 1].close,
+          high: Math.max(...chunk.map(c => c.high)),
+          low: Math.min(...chunk.map(c => c.low)),
+          volume: chunk.reduce((sum, c) => sum + (c.volume || 0), 0)
+        });
+      }
+      return weekly;
+    } else if (timeFrame === 'M') {
+      // 월봉: 20거래일 단위로 그룹화
+      const monthly: any[] = [];
+      for (let i = 0; i < candleData.length; i += 20) {
+        const chunk = candleData.slice(i, i + 20);
+        if (chunk.length === 0) continue;
+        monthly.push({
+          date: chunk[0].date,
+          open: chunk[0].open,
+          close: chunk[chunk.length - 1].close,
+          high: Math.max(...chunk.map(c => c.high)),
+          low: Math.min(...chunk.map(c => c.low)),
+          volume: chunk.reduce((sum, c) => sum + (c.volume || 0), 0)
+        });
+      }
+      return monthly;
+    }
+    return candleData;
+  }, [candleData, timeFrame]);
 
   // 캔들 데이터 로드 (./data parquet에서)
   useEffect(() => {
@@ -147,6 +175,113 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
     
     fetchCandleData();
   }, [stock.symbol]);
+
+  // Lightweight Charts 초기화 및 업데이트
+  useEffect(() => {
+    if (!chartContainerRef.current) return;
+
+    // 차트 생성
+    const chart = createChart(chartContainerRef.current, {
+      layout: {
+        background: { type: ColorType.Solid, color: '#1a1f2e' },
+        textColor: '#94a3b8',
+      },
+      grid: {
+        vertLines: { color: '#2d3446' },
+        horzLines: { color: '#2d3446' },
+      },
+      width: chartContainerRef.current.clientWidth,
+      height: 300,
+      timeScale: {
+        borderColor: '#2d3446',
+        timeVisible: true,
+      },
+      rightPriceScale: {
+        borderColor: '#2d3446',
+      },
+      crosshair: {
+        mode: 0,
+        vertLine: {
+          color: '#06b6d4',
+          width: 0.5,
+          style: 1,
+          labelBackgroundColor: '#06b6d4',
+        },
+        horzLine: {
+          color: '#06b6d4',
+          width: 0.5,
+          style: 1,
+          labelBackgroundColor: '#06b6d4',
+        },
+      },
+    });
+
+    const candlestickSeries = chart.addCandlestickSeries({
+      upColor: '#f43f5e', // 한국 스타일: 상승(빨강)
+      downColor: '#3b82f6', // 한국 스타일: 하락(파란색)
+      borderVisible: false,
+      wickUpColor: '#f43f5e',
+      wickDownColor: '#3b82f6',
+    });
+
+    const volumeSeries = chart.addHistogramSeries({
+      color: '#334155',
+      priceFormat: {
+        type: 'volume',
+      },
+      priceScaleId: '', // overlay
+    });
+
+    volumeSeries.priceScale().applyOptions({
+      scaleMargins: {
+        top: 0.8,
+        bottom: 0,
+      },
+    });
+
+    chartRef.current = chart;
+    candlestickSeriesRef.current = candlestickSeries;
+    volumeSeriesRef.current = volumeSeries;
+
+    // 반응형 처리
+    const handleResize = () => {
+      if (chartContainerRef.current) {
+        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+      }
+    };
+
+    window.addEventListener('resize', handleResize);
+
+    return () => {
+      window.removeEventListener('resize', handleResize);
+      chart.remove();
+    };
+  }, []);
+
+  // 데이터 업데이트
+  useEffect(() => {
+    if (candlestickSeriesRef.current && volumeSeriesRef.current && filteredCandleData.length > 0) {
+      const formattedCandles = filteredCandleData.map(d => ({
+        time: d.date,
+        open: d.open,
+        high: d.high,
+        low: d.low,
+        close: d.close,
+      }));
+
+      const formattedVolume = filteredCandleData.map(d => ({
+        time: d.date,
+        value: d.volume || 0,
+        color: d.close >= d.open ? '#f43f5ecc' : '#3b82f6cc',
+      }));
+
+      candlestickSeriesRef.current.setData(formattedCandles);
+      volumeSeriesRef.current.setData(formattedVolume);
+
+      // 최신 데이터로 이동
+      chartRef.current?.timeScale().fitContent();
+    }
+  }, [filteredCandleData]);
 
   // 투자자별 수급 데이터 로드 (KIS API 또는 네이버 금융 크롤링)
   useEffect(() => {
@@ -238,48 +373,6 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
     fetchMarginData();
   }, [stock.symbol]);
 
-  // 타임프레임에 따른 캔들 데이터 필터링
-  const filteredCandleData = useMemo(() => {
-    if (!candleData.length) return [];
-    
-    if (timeFrame === 'D') {
-      return candleData;
-    } else if (timeFrame === 'W') {
-      // 주봉: 7일 단위로 그룹화
-      const weekly: any[] = [];
-      for (let i = 0; i < candleData.length; i += 5) {
-        const chunk = candleData.slice(i, i + 5);
-        if (chunk.length === 0) continue;
-        weekly.push({
-          time: chunk[0].time,
-          open: chunk[0].open,
-          close: chunk[chunk.length - 1].close,
-          high: Math.max(...chunk.map(c => c.high)),
-          low: Math.min(...chunk.map(c => c.low)),
-          display: [chunk[0].open, chunk[chunk.length - 1].close]
-        });
-      }
-      return weekly;
-    } else if (timeFrame === 'M') {
-      // 월봉: 20일 단위로 그룹화
-      const monthly: any[] = [];
-      for (let i = 0; i < candleData.length; i += 20) {
-        const chunk = candleData.slice(i, i + 20);
-        if (chunk.length === 0) continue;
-        monthly.push({
-          time: chunk[0].time,
-          open: chunk[0].open,
-          close: chunk[chunk.length - 1].close,
-          high: Math.max(...chunk.map(c => c.high)),
-          low: Math.min(...chunk.map(c => c.low)),
-          display: [chunk[0].open, chunk[chunk.length - 1].close]
-        });
-      }
-      return monthly;
-    }
-    return candleData;
-  }, [candleData, timeFrame]);
-
   // 가상의 캔들 데이터 생성 - 제거됨 (실제 데이터 사용)
 
   const handleAddMemo = async () => {
@@ -342,6 +435,15 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
   const daysSinceAdded = Math.floor((Date.now() - new Date(stock.addedAt).getTime()) / (1000 * 60 * 60 * 24));
 
   const [showTradeModal, setShowTradeModal] = useState(false);
+  const [isChartMounted, setIsChartMounted] = useState(false);
+
+  useEffect(() => {
+    // Recharts sizing issue resolution: Wait for mount and a small delay for DOM layout
+    const timer = setTimeout(() => {
+      setIsChartMounted(true);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, []);
 
   return (
     <div className="animate-in fade-in slide-in-from-bottom-6 duration-700 pb-20">
@@ -365,8 +467,8 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
         </div>
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-8">
+      <div className="space-y-10">
+        <div className="space-y-10">
           {/* 상단 기본 정보 카드 */}
           <div className="card-flat rounded-3xl p-8 shadow-2xl relative overflow-hidden">
             <div className="flex flex-wrap justify-between items-start gap-6 mb-8 relative z-10">
@@ -457,25 +559,27 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
                 ) : marginError || marginData.length === 0 ? (
                   <NoDataMessage message={marginError || "조회안됨"} />
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={marginData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
-                      <XAxis dataKey="quarter" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} />
-                      <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} tickFormatter={(v) => `${v}%`} />
-                      <Tooltip 
-                        contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}}
-                        formatter={(value: number, name: string) => {
-                          if (name === 'margin') return [`${value.toFixed(2)}%`, '영업이익률'];
-                          return [value, name];
-                        }}
-                      />
-                      <Bar dataKey="margin" name="영업이익률" radius={[6, 6, 0, 0]}>
-                        {marginData.map((entry, index) => (
-                          <Cell key={`cell-${index}`} fill={entry.margin >= 0 ? '#22c55e' : '#f43f5e'} />
-                        ))}
-                      </Bar>
-                    </BarChart>
-                  </ResponsiveContainer>
+                  isChartMounted && (
+                    <ResponsiveContainer width="100%" height={256} minWidth={0}>
+                      <BarChart data={marginData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
+                        <XAxis dataKey="quarter" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} />
+                        <YAxis axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} tickFormatter={(v) => `${v}%`} />
+                        <Tooltip 
+                          contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}}
+                          formatter={(value: number, name: string) => {
+                            if (name === 'margin') return [`${value.toFixed(2)}%`, '영업이익률'];
+                            return [value, name];
+                          }}
+                        />
+                        <Bar dataKey="margin" name="영업이익률" radius={[6, 6, 0, 0]}>
+                          {marginData.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.margin >= 0 ? '#22c55e' : '#f43f5e'} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  )
                 )}
               </div>
             </div>
@@ -494,20 +598,22 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
                 ) : investorError || investorData.length === 0 ? (
                   <NoDataMessage message={investorError || "조회안됨"} />
                 ) : (
-                  <ResponsiveContainer width="100%" height="100%">
-                    <LineChart data={investorData}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
-                      <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} />
-                      <YAxis hide />
-                      <Tooltip 
-                        contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}}
-                      />
-                      <Legend iconType="circle" wrapperStyle={{fontSize: '11px', fontWeight: 700, paddingTop: '10px'}} />
-                      <Line type="monotone" dataKey="외국인" stroke="#06b6d4" strokeWidth={3} dot={false} />
-                      <Line type="monotone" dataKey="기관" stroke="#f97316" strokeWidth={3} dot={false} />
-                      <Line type="monotone" dataKey="개인" stroke="#facc15" strokeWidth={3} dot={false} />
-                    </LineChart>
-                  </ResponsiveContainer>
+                  isChartMounted && (
+                    <ResponsiveContainer width="100%" height={256} minWidth={0}>
+                      <LineChart data={investorData}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
+                        <XAxis dataKey="date" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10}} />
+                        <YAxis hide />
+                        <Tooltip 
+                          contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}}
+                        />
+                        <Legend iconType="circle" wrapperStyle={{fontSize: '11px', fontWeight: 700, paddingTop: '10px'}} />
+                        <Line type="monotone" dataKey="외국인" stroke="#06b6d4" strokeWidth={3} dot={false} />
+                        <Line type="monotone" dataKey="기관" stroke="#f97316" strokeWidth={3} dot={false} />
+                        <Line type="monotone" dataKey="개인" stroke="#facc15" strokeWidth={3} dot={false} />
+                      </LineChart>
+                    </ResponsiveContainer>
+                  )
                 )}
               </div>
             </div>
@@ -540,25 +646,16 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
               </div>
             </div>
 
-            <div className="h-64 w-full overflow-x-auto custom-scrollbar">
-              {candleLoading ? (
-                <div className="flex items-center justify-center h-full text-slate-500">
-                  <p className="font-bold">로딩 중...</p>
+            <div className="h-[300px] w-full relative">
+              {candleLoading && (
+                <div className="absolute inset-0 flex items-center justify-center bg-[#1a1f2e]/50 z-10 text-slate-500">
+                  <p className="font-bold text-sm text-point-cyan animate-pulse">차트 데이터를 불러오는 중...</p>
                 </div>
-              ) : candleError || filteredCandleData.length === 0 ? (
+              )}
+              {candleError || (candleData.length === 0 && !candleLoading) ? (
                 <NoDataMessage message={candleError || "데이터없음"} />
               ) : (
-                <div style={{ minWidth: '800px', width: '100%', height: '256px' }}>
-                  <ResponsiveContainer width="100%" height={256}>
-                    <BarChart data={filteredCandleData} barGap={0}>
-                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#2d3446" />
-                      <XAxis dataKey="time" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} dy={15} />
-                      <YAxis domain={['auto', 'auto']} orientation="right" axisLine={false} tickLine={false} tick={{fill: '#475569', fontSize: 10, fontWeight: 700}} />
-                      <Tooltip contentStyle={{backgroundColor: '#0f121d', borderRadius: '12px', border: '1px solid #334155', fontSize: '11px'}} />
-                      <Bar dataKey="display" shape={<Candlestick />} />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
+                <div ref={chartContainerRef} className="w-full h-full rounded-xl overflow-hidden shadow-inner border border-slate-700/30" />
               )}
             </div>
           </div>
@@ -581,42 +678,42 @@ export const StockDetail: React.FC<StockDetailProps> = ({ stock, onBack, onUpdat
               </Button>
             </div>
           </div>
-        </div>
 
-        {/* 사이드바 히스토리 */}
-        <div className="space-y-8">
-          <div className="flex items-center justify-between px-4">
-            <h3 className="text-2xl font-black text-white flex items-center tracking-tight">
-              <Calendar className="w-6 h-6 mr-3 text-point-orange" />
-              히스토리
-            </h3>
-            <span className="bg-[#1a1f2e] text-point-cyan text-[11px] font-black px-3 py-1.5 rounded-full border border-slate-700">{stock.memos.length} ANALYSES</span>
-          </div>
-          
-          <div className="space-y-5 max-h-[1200px] overflow-y-auto pr-3 custom-scrollbar">
-            {stock.memos.length === 0 && (
-              <div className="text-center py-24 bg-[#1a1f2e]/50 rounded-2xl border border-dashed border-slate-700">
-                <ScrollText className="w-12 h-12 text-slate-700 mx-auto mb-4" />
-                <p className="text-slate-500 font-extrabold italic">아직 기록된 분석이 없습니다.</p>
-              </div>
-            )}
-            {stock.memos.map((memo) => (
-              <div key={memo.id} className="card-flat p-8 rounded-2xl shadow-lg relative group hover:border-point-cyan transition-all">
-                <button 
-                  onClick={() => handleDeleteMemo(memo.id)}
-                  className="absolute top-8 right-8 text-slate-700 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                >
-                  <Trash2 className="w-5 h-5" />
-                </button>
-                <div className="text-[11px] text-point-cyan font-black mb-4 flex items-center gap-3">
-                  <div className="w-2.5 h-2.5 rounded-full bg-point-cyan shadow-[0_0_10px_rgba(6,182,212,0.5)]"></div>
-                  {new Date(memo.date).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })}
+          {/* 히스토리 관리 섹션 - 맨 아래로 이동 */}
+          <div className="space-y-8 pt-8 border-t border-slate-800">
+            <div className="flex items-center justify-between px-4">
+              <h3 className="text-2xl font-black text-white flex items-center tracking-tight">
+                <Calendar className="w-6 h-6 mr-3 text-point-orange" />
+                분석 히스토리
+              </h3>
+              <span className="bg-[#1a1f2e] text-point-cyan text-[11px] font-black px-3 py-1.5 rounded-full border border-slate-700">{stock.memos.length} ANALYSES</span>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-5 overflow-y-auto pr-3 custom-scrollbar">
+              {stock.memos.length === 0 && (
+                <div className="md:col-span-2 text-center py-24 bg-[#1a1f2e]/50 rounded-2xl border border-dashed border-slate-700">
+                  <ScrollText className="w-12 h-12 text-slate-700 mx-auto mb-4" />
+                  <p className="text-slate-500 font-extrabold italic">아직 기록된 분석이 없습니다.</p>
                 </div>
-                <div className="text-slate-300 whitespace-pre-wrap leading-loose text-sm font-bold tracking-tight">
-                  {memo.content}
+              )}
+              {stock.memos.map((memo) => (
+                <div key={memo.id} className="card-flat p-8 rounded-2xl shadow-lg relative group hover:border-point-cyan transition-all">
+                  <button 
+                    onClick={() => handleDeleteMemo(memo.id)}
+                    className="absolute top-8 right-8 text-slate-700 hover:text-rose-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                  >
+                    <Trash2 className="w-5 h-5" />
+                  </button>
+                  <div className="text-[11px] text-point-cyan font-black mb-4 flex items-center gap-3">
+                    <div className="w-2.5 h-2.5 rounded-full bg-point-cyan shadow-[0_0_10px_rgba(6,182,212,0.5)]"></div>
+                    {new Date(memo.date).toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' })}
+                  </div>
+                  <div className="text-slate-300 whitespace-pre-wrap leading-loose text-sm font-bold tracking-tight">
+                    {memo.content}
+                  </div>
                 </div>
-              </div>
-            ))}
+              ))}
+            </div>
           </div>
         </div>
       </div>

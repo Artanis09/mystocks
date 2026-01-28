@@ -9,6 +9,11 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
         allowedHosts: ['waltz-star.exe.xyz'],
+        hmr: {
+          host: 'waltz-star.exe.xyz',
+          protocol: 'wss',
+          clientPort: 443,
+        },
         proxy: {
           '/api': {
             target: 'http://backend:5000',

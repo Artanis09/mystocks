@@ -44,6 +44,24 @@ export const TradeManager: React.FC<TradeManagerProps> = ({ stockId, stockSymbol
   const [memo, setMemo] = useState('');
 
   const loadData = async () => {
+    // temp_ 로 시작하는 임시 주식은 데이터를 불러오지 않음
+    if (stockId.startsWith('temp_')) {
+      setTrades([]);
+      setReturns({
+        current_price: 0,
+        avg_buy_price: 0,
+        remaining_quantity: 0,
+        invested_amount: 0,
+        current_value: 0,
+        realized_profit: 0,
+        unrealized_profit: 0,
+        total_profit: 0,
+        return_rate: 0
+      } as any);
+      setIsLoading(false);
+      return;
+    }
+
     setIsLoading(true);
     try {
       const [tradesRes, returnsRes] = await Promise.all([

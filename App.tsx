@@ -586,7 +586,6 @@ const App: React.FC = () => {
         return (
           <Recommendations 
             onStockClick={handleRecStockClick} 
-            onAddToAutoTrading={handleAddToAutoTrading}
           />
         );
       case 'autotrading':
