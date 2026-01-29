@@ -287,5 +287,271 @@ export const getStockDetail = async (code: string): Promise<StockDetailInfo | nu
 
   return null;
 };
+
+// =============================
+// NXT (야간거래) 관련 함수
+// =============================
+
+// NXT 종목 캐시
+let nxtStocksCache: Set<string> = new Set();
+let nxtCacheTime = 0;
+let nxtStatusCache: { isNxtHours: boolean; time: number } = { isNxtHours: false, time: 0 };
+
+/**
+ * NXT 거래 가능 종목 목록 로드
+ */
+export const loadNxtStocks = async (): Promise<Set<string>> => {
+  const now = Date.now();
+  // 1시간 이내면 캐시 사용
+  if (nxtStocksCache.size > 0 && (now - nxtCacheTime) < 3600000) {
+    return nxtStocksCache;
+  }
+  
+  try {
+    const response = await fetch(`${API_BASE_URL}/nxt/stocks`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success && data.codes) {
+        nxtStocksCache = new Set(data.codes);
+        nxtCacheTime = now;
+        console.log(`NXT 종목 ${nxtStocksCache.size}개 로드 완료`);
+        return nxtStocksCache;
+      }
+    }
+  } catch (e) {
+    console.error('NXT 종목 로드 실패:', e);
+  }
+  return nxtStocksCache;
+};
+
+/**
+ * 특정 종목이 NXT 거래 가능한지 확인
+ */
+export const isNxtStock = (code: string): boolean => {
+  return nxtStocksCache.has(code.padStart(6, '0'));
+};
+
+/**
+ * NXT 시간대인지 확인 (17:30~익일 08:00)
+ */
+export const checkNxtHours = async (): Promise<boolean> => {
+  const now = Date.now();
+  // 30초 이내면 캐시 사용
+  if ((now - nxtStatusCache.time) < 30000) {
+    return nxtStatusCache.isNxtHours;
+  }
+  
+  try {
+    const response = await fetch(`${API_BASE_URL}/nxt/status`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        nxtStatusCache = { isNxtHours: data.is_nxt_hours, time: now };
+        return data.is_nxt_hours;
+      }
+    }
+  } catch (e) {
+    // 클라이언트 측 계산 fallback
+    const hour = new Date().getHours();
+    const minute = new Date().getMinutes();
+    const isNxt = (hour > 17 || (hour === 17 && minute >= 30)) || hour < 8;
+    nxtStatusCache = { isNxtHours: isNxt, time: now };
+    return isNxt;
+  }
+  return false;
+};
+
+/**
+ * 여러 종목의 NXT 정보 일괄 조회
+ */
+export const getNxtInfoBatch = async (codes: string[]): Promise<Record<string, { is_nxt: boolean; is_nxt_hours: boolean }>> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/stock-info-batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes })
+    });
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        return data.data;
+      }
+    }
+  } catch (e) {
+    console.error('NXT 정보 일괄 조회 실패:', e);
+  }
+  return {};
+};
+
+/**
+ * NXT 현재가 조회 (NXT 시간대에만 유효)
+ */
+export const getNxtPrice = async (code: string): Promise<{ currentPrice: number; change: number; changePercent: number } | null> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/nxt/price/${code}`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success && data.data) {
+        return {
+          currentPrice: data.data.currentPrice,
+          change: data.data.change,
+          changePercent: data.data.changePercent
+        };
+      }
+    }
+  } catch (e) {
+    console.error('NXT 현재가 조회 실패:', e);
+  }
+  return null;
+};
+
+// =============================
+// 웹소켓 실시간 가격 API
+// =============================
+
+/**
+ * 웹소켓 연결 상태 조회
+ */
+export const getWebSocketStatus = async (): Promise<{
+  is_connected: boolean;
+  subscribed_count: number;
+  subscribed_codes: string[];
+  websocket_available: boolean;
+}> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/status`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        return {
+          is_connected: data.is_connected,
+          subscribed_count: data.subscribed_count,
+          subscribed_codes: data.subscribed_codes || [],
+          websocket_available: data.websocket_available
+        };
+      }
+    }
+  } catch (e) {
+    console.error('웹소켓 상태 조회 실패:', e);
+  }
+  return { is_connected: false, subscribed_count: 0, subscribed_codes: [], websocket_available: false };
+};
+
+/**
+ * 웹소켓 연결
+ */
+export const connectWebSocket = async (): Promise<boolean> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/connect`, { method: 'POST' });
+    if (response.ok) {
+      const data = await response.json();
+      return data.success;
+    }
+  } catch (e) {
+    console.error('웹소켓 연결 실패:', e);
+  }
+  return false;
+};
+
+/**
+ * 웹소켓 연결 해제
+ */
+export const disconnectWebSocket = async (): Promise<boolean> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/disconnect`, { method: 'POST' });
+    if (response.ok) {
+      const data = await response.json();
+      return data.success;
+    }
+  } catch (e) {
+    console.error('웹소켓 연결 해제 실패:', e);
+  }
+  return false;
+};
+
+/**
+ * 종목 웹소켓 구독
+ */
+export const subscribeWebSocket = async (codes: string[]): Promise<{ success: boolean; subscribed: number }> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/subscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes })
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return { success: data.success, subscribed: data.subscribed || 0 };
+    }
+  } catch (e) {
+    console.error('웹소켓 구독 실패:', e);
+  }
+  return { success: false, subscribed: 0 };
+};
+
+/**
+ * 종목 웹소켓 구독 해제
+ */
+export const unsubscribeWebSocket = async (codes: string[]): Promise<boolean> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/unsubscribe`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ codes })
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return data.success;
+    }
+  } catch (e) {
+    console.error('웹소켓 구독 해제 실패:', e);
+  }
+  return false;
+};
+
+/**
+ * 등록된 모든 종목 웹소켓 구독
+ */
+export const subscribeAllRegisteredStocks = async (): Promise<{ success: boolean; subscribed: number; message: string }> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/subscribe-all-registered`, { method: 'POST' });
+    if (response.ok) {
+      const data = await response.json();
+      return { 
+        success: data.success, 
+        subscribed: data.subscribed || 0,
+        message: data.message || ''
+      };
+    }
+  } catch (e) {
+    console.error('전체 종목 웹소켓 구독 실패:', e);
+  }
+  return { success: false, subscribed: 0, message: '구독 실패' };
+};
+
+/**
+ * 웹소켓 실시간 가격 조회
+ */
+export const getWebSocketPrices = async (): Promise<Record<string, {
+  currentPrice: number;
+  change: number;
+  changePercent: number;
+  volume: number;
+  timestamp: number;
+}>> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/ws/prices`);
+    if (response.ok) {
+      const data = await response.json();
+      if (data.success) {
+        return data.prices || {};
+      }
+    }
+  } catch (e) {
+    console.error('웹소켓 가격 조회 실패:', e);
+  }
+  return {};
+};
+
 // 실제 pykrx 연동을 위해 Python API 서버 필요
 // 여기서는 모의 구현

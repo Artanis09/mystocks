@@ -1,124 +1,219 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
-  TrendingUp, 
-  TrendingDown,
-  ArrowUpRight,
-  ArrowDownRight,
-  Users,
-  Building2,
-  Globe,
-  RefreshCw
+  Play,
+  Square,
+  RefreshCw,
+  Database,
+  Calendar,
+  Clock,
+  CheckCircle,
+  XCircle,
+  AlertCircle,
+  Loader2,
+  FolderOpen,
+  Activity
 } from 'lucide-react';
-import { MarketIndex, MarketInvestorTrend } from '../types';
 import { useResponsive } from '../hooks/useResponsive';
-import { 
-  AreaChart, 
-  Area, 
-  XAxis, 
-  YAxis, 
-  Tooltip, 
-  ResponsiveContainer,
-  BarChart,
-  Bar,
-  Cell,
-  Legend
-} from 'recharts';
 
 const API_BASE_URL = '/api';
 
+interface CrawlProgress {
+  current: number;
+  total: number;
+  current_code: string | null;
+  current_name: string | null;
+  success_count: number;
+  fail_count: number;
+  started_at: string | null;
+  eta_seconds: number | null;
+}
+
+interface SchedulerStatus {
+  eod_done_today: boolean;
+  intraday_done_today: boolean;
+  inference_done_today: boolean;
+  last_check_date: string | null;
+  crawling_status: string | null;
+  crawling_start_time: string | null;
+  crawling_error: string | null;
+  last_crawl_completed_at: string | null;
+  last_crawl_mode: string | null;
+  last_crawl_date_range: string | null;
+  last_crawl_duration: number | null;
+  crawl_progress: CrawlProgress | null;
+}
+
+interface CrawlDateInfo {
+  date: string;
+  hasData: boolean;
+}
+
 export const Dashboard: React.FC = () => {
   const { isMobile } = useResponsive();
-  const [indices, setIndices] = useState<{ kospi: MarketIndex; kosdaq: MarketIndex } | null>(null);
-  const [investorTrends, setInvestorTrends] = useState<MarketInvestorTrend[]>([]);
+  const [schedulerStatus, setSchedulerStatus] = useState<SchedulerStatus | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [crawlDates, setCrawlDates] = useState<CrawlDateInfo[]>([]);
+  const [isLoadingDates, setIsLoadingDates] = useState(false);
+  
+  // Manual crawl form
+  const [startDate, setStartDate] = useState('');
+  const [endDate, setEndDate] = useState('');
+  const [crawlMode, setCrawlMode] = useState<'eod' | 'intraday'>('eod');
+  const [isStartingCrawl, setIsStartingCrawl] = useState(false);
+  
+  // SSE connection
+  const eventSourceRef = useRef<EventSource | null>(null);
 
-  const loadData = async () => {
-    setIsLoading(true);
+  const loadStatus = useCallback(async () => {
     try {
-      const [indicesRes, trendsRes] = await Promise.all([
-        fetch(`${API_BASE_URL}/market-indices`),
-        fetch(`${API_BASE_URL}/market-investor-trends`)
-      ]);
-
-      if (indicesRes.ok) {
-        const indicesData = await indicesRes.json();
-        setIndices(indicesData);
+      const res = await fetch(`${API_BASE_URL}/scheduler/status`);
+      if (res.ok) {
+        const data = await res.json();
+        setSchedulerStatus(data);
       }
-
-      if (trendsRes.ok) {
-        const trendsData = await trendsRes.json();
-        setInvestorTrends(trendsData.data || []);
-      }
-
       setLastUpdated(new Date());
     } catch (error) {
-      console.error('대시보드 데이터 로딩 실패:', error);
+      console.error('스케줄러 상태 로딩 실패:', error);
     } finally {
       setIsLoading(false);
     }
-  };
-
-  useEffect(() => {
-    loadData();
-    // 1분마다 자동 새로고침
-    const interval = setInterval(loadData, 60000);
-    return () => clearInterval(interval);
   }, []);
 
-  const formatNumber = (num: number) => {
-    return new Intl.NumberFormat('ko-KR').format(num);
+  const loadRecentDates = useCallback(async () => {
+    setIsLoadingDates(true);
+    try {
+      // Get last 30 dates from crawl data API
+      const res = await fetch(`${API_BASE_URL}/crawl-dates?limit=30`);
+      if (res.ok) {
+        const data = await res.json();
+        setCrawlDates(data.dates || []);
+      }
+    } catch (error) {
+      console.error('수집 날짜 로딩 실패:', error);
+    } finally {
+      setIsLoadingDates(false);
+    }
+  }, []);
+
+  // SSE 연결 관리
+  useEffect(() => {
+    const connectSSE = () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+      
+      const es = new EventSource(`${API_BASE_URL}/crawl-progress/stream`);
+      
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data.type === 'crawl_progress' && data.progress) {
+            setSchedulerStatus(prev => prev ? {
+              ...prev,
+              crawling_status: data.status,
+              crawl_progress: data.progress
+            } : null);
+          }
+        } catch (e) {
+          console.error('SSE 파싱 오류:', e);
+        }
+      };
+      
+      es.onerror = () => {
+        es.close();
+        // 5초 후 재연결 시도
+        setTimeout(connectSSE, 5000);
+      };
+      
+      eventSourceRef.current = es;
+    };
+    
+    connectSSE();
+    
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    loadStatus();
+    loadRecentDates();
+    const interval = setInterval(loadStatus, 5000); // 5초마다 상태 갱신
+    return () => clearInterval(interval);
+  }, [loadStatus, loadRecentDates]);
+
+  const handleTriggerTask = async (task: 'eod' | 'intraday' | 'inference') => {
+    try {
+      const res = await fetch(`${API_BASE_URL}/scheduler/trigger?task=${task}`, {
+        method: 'POST'
+      });
+      if (res.ok) {
+        await loadStatus();
+      } else {
+        const data = await res.json();
+        alert(data.error || '작업 시작 실패');
+      }
+    } catch (error) {
+      console.error('작업 트리거 실패:', error);
+      alert('작업 시작 중 오류가 발생했습니다.');
+    }
   };
 
-  const formatDate = (dateStr: string) => {
-    if (!dateStr || dateStr.length !== 8) return dateStr;
-    return `${dateStr.slice(4, 6)}/${dateStr.slice(6, 8)}`;
+  const handleManualCrawl = async () => {
+    if (!startDate) {
+      alert('시작 날짜를 입력하세요.');
+      return;
+    }
+    setIsStartingCrawl(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/crawl`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          start_date: startDate,
+          end_date: endDate || startDate,
+          mode: crawlMode
+        })
+      });
+      if (res.ok) {
+        await loadStatus();
+        setStartDate('');
+        setEndDate('');
+      } else {
+        const data = await res.json();
+        alert(data.error || '수집 시작 실패');
+      }
+    } catch (error) {
+      console.error('수집 시작 실패:', error);
+      alert('수집 시작 중 오류가 발생했습니다.');
+    } finally {
+      setIsStartingCrawl(false);
+    }
   };
 
-  const IndexCard: React.FC<{ index: MarketIndex; color: string }> = ({ index, color }) => {
-    const isPositive = index.change >= 0;
-    return (
-      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'} hover:border-${color}/30 transition-all`}>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white`}>{index.name}</h3>
-          <div className={`p-2 rounded-lg ${isPositive ? 'bg-emerald-500/10' : 'bg-rose-500/10'}`}>
-            {isPositive ? <TrendingUp className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-emerald-400`} /> : <TrendingDown className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-rose-400`} />}
-          </div>
-        </div>
-        
-        <div className="space-y-3">
-          <div className={`${isMobile ? 'text-2xl' : 'text-3xl'} font-black text-white`}>{formatNumber(Math.round(index.currentValue * 100) / 100)}</div>
-          
-          <div className="flex items-center gap-3">
-            <span className={`flex items-center gap-1 ${isMobile ? 'text-xs' : 'text-sm'} font-bold ${isPositive ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {isPositive ? <ArrowUpRight className="w-4 h-4" /> : <ArrowDownRight className="w-4 h-4" />}
-              {isPositive ? '+' : ''}{formatNumber(Math.round(index.change * 100) / 100)}
-            </span>
-            <span className={`${isMobile ? 'text-xs' : 'text-sm'} font-bold px-2 py-0.5 rounded ${isPositive ? 'bg-emerald-500/10 text-emerald-400' : 'bg-rose-500/10 text-rose-400'}`}>
-              {isPositive ? '+' : ''}{(Math.round(index.changePercent * 100) / 100).toFixed(2)}%
-            </span>
-          </div>
-
-          <div className="grid grid-cols-3 gap-2 pt-3 border-t border-slate-800">
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">시가</div>
-              <div className="text-sm font-bold text-slate-300">{formatNumber(Math.round(index.open * 100) / 100)}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">고가</div>
-              <div className="text-sm font-bold text-emerald-400">{formatNumber(Math.round(index.high * 100) / 100)}</div>
-            </div>
-            <div>
-              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">저가</div>
-              <div className="text-sm font-bold text-rose-400">{formatNumber(Math.round(index.low * 100) / 100)}</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    );
+  const formatDuration = (seconds: number | null) => {
+    if (!seconds) return '-';
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.round(seconds % 60);
+    return mins > 0 ? `${mins}분 ${secs}초` : `${secs}초`;
   };
 
-  if (isLoading && !indices) {
+  const formatDateTime = (isoStr: string | null) => {
+    if (!isoStr) return '-';
+    try {
+      const d = new Date(isoStr);
+      return d.toLocaleString('ko-KR');
+    } catch {
+      return isoStr;
+    }
+  };
+
+  const isCrawling = schedulerStatus?.crawling_status != null;
+
+  if (isLoading && !schedulerStatus) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="flex items-center gap-3 text-slate-400">
@@ -130,15 +225,15 @@ export const Dashboard: React.FC = () => {
   }
 
   return (
-    <div className={`space-y-${isMobile ? '4' : '8'}`}>
+    <div className={`space-y-${isMobile ? '4' : '6'}`}>
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className={`${isMobile ? 'text-xl' : 'text-3xl'} font-black text-white tracking-tight`}>시장 대시보드</h1>
-          <p className={`text-slate-500 font-bold mt-1 ${isMobile ? 'text-xs' : ''}`}>실시간 시장 지수 및 투자자 동향</p>
+          <h1 className={`${isMobile ? 'text-xl' : 'text-3xl'} font-black text-white tracking-tight`}>데이터 수집 관리</h1>
+          <p className={`text-slate-500 font-bold mt-1 ${isMobile ? 'text-xs' : ''}`}>KRX 주가 데이터 수집 현황</p>
         </div>
         <button 
-          onClick={loadData}
+          onClick={() => { loadStatus(); loadRecentDates(); }}
           disabled={isLoading}
           className={`flex items-center gap-2 bg-[#1a1f2e] border border-slate-700 text-slate-400 hover:text-white hover:border-slate-600 ${isMobile ? 'px-3 py-1.5 text-xs' : 'px-4 py-2 text-sm'} rounded-xl font-bold transition-all disabled:opacity-50`}
         >
@@ -153,115 +248,317 @@ export const Dashboard: React.FC = () => {
         </div>
       )}
 
-      {/* Market Indices */}
-      {indices && (
-        <div className={`grid ${isMobile ? 'grid-cols-1 gap-3' : 'grid-cols-1 md:grid-cols-2 gap-6'}`}>
-          <IndexCard index={indices.kospi} color="point-cyan" />
-          <IndexCard index={indices.kosdaq} color="violet" />
-        </div>
-      )}
-
-      {/* Investor Trends Chart */}
-      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
-        <div className={`flex ${isMobile ? 'flex-col gap-3' : 'items-center justify-between'} mb-6`}>
-          <div>
-            <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white`}>투자자별 매매동향 (KOSPI)</h3>
-            <p className={`${isMobile ? 'text-xs' : 'text-sm'} text-slate-500 mt-1`}>최근 20일간 순매수 추이</p>
-          </div>
-          <div className={`flex items-center gap-${isMobile ? '3' : '4'} text-xs`}>
-            <div className="flex items-center gap-2">
-              <Users className="w-4 h-4 text-amber-400" />
-              <span className="text-slate-400">개인</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Globe className="w-4 h-4 text-emerald-400" />
-              <span className="text-slate-400">외국인</span>
-            </div>
-            <div className="flex items-center gap-2">
-              <Building2 className="w-4 h-4 text-violet-400" />
-              <span className="text-slate-400">기관</span>
-            </div>
-          </div>
+      {/* Current Status Card */}
+      <div className={`bg-[#1a1f2e] border ${isCrawling ? 'border-amber-500/50' : 'border-slate-800'} rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white flex items-center gap-2`}>
+            <Database className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-point-cyan`} />
+            현재 상태
+          </h3>
+          {isCrawling && (
+            <span className="flex items-center gap-2 px-3 py-1 rounded-lg bg-amber-500/10 text-amber-400 text-xs font-bold">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              {schedulerStatus?.crawling_status?.toUpperCase()} 수집 중
+            </span>
+          )}
         </div>
 
-        {investorTrends.length > 0 ? (
-          <ResponsiveContainer width="100%" height={isMobile ? 200 : 300}>
-            <BarChart data={[...investorTrends].reverse().slice(-15)}>
-              <XAxis 
-                dataKey="date" 
-                tickFormatter={formatDate}
-                tick={{ fill: '#64748b', fontSize: 10 }}
-                axisLine={{ stroke: '#334155' }}
-              />
-              <YAxis 
-                tick={{ fill: '#64748b', fontSize: 10 }}
-                axisLine={{ stroke: '#334155' }}
-                tickFormatter={(v) => `${(v / 1000000).toFixed(0)}M`}
-              />
-              <Tooltip 
-                contentStyle={{ 
-                  backgroundColor: '#1a1f2e', 
-                  border: '1px solid #334155',
-                  borderRadius: '12px',
-                  fontSize: '12px'
-                }}
-                formatter={(value: number, name: string) => {
-                  const labels: Record<string, string> = { individual: '개인', foreign: '외국인', institution: '기관' };
-                  return [formatNumber(value), labels[name] || name];
-                }}
-                labelFormatter={(label) => `날짜: ${formatDate(label)}`}
-              />
-              <Bar dataKey="individual" fill="#f59e0b" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="foreign" fill="#10b981" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="institution" fill="#8b5cf6" radius={[4, 4, 0, 0]} />
-            </BarChart>
-          </ResponsiveContainer>
-        ) : (
-          <div className="h-[300px] flex items-center justify-center text-slate-500">
-            데이터를 불러올 수 없습니다.
+        <div className={`grid ${isMobile ? 'grid-cols-2 gap-3' : 'grid-cols-4 gap-4'}`}>
+          <div className="bg-[#0d1117] rounded-xl p-3">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">EOD 수집</div>
+            <div className="flex items-center gap-2">
+              {schedulerStatus?.eod_done_today ? (
+                <CheckCircle className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <XCircle className="w-4 h-4 text-slate-500" />
+              )}
+              <span className={`text-sm font-bold ${schedulerStatus?.eod_done_today ? 'text-emerald-400' : 'text-slate-500'}`}>
+                {schedulerStatus?.eod_done_today ? '완료' : '미완료'}
+              </span>
+            </div>
+          </div>
+          
+          <div className="bg-[#0d1117] rounded-xl p-3">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">Intraday</div>
+            <div className="flex items-center gap-2">
+              {schedulerStatus?.intraday_done_today ? (
+                <CheckCircle className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <XCircle className="w-4 h-4 text-slate-500" />
+              )}
+              <span className={`text-sm font-bold ${schedulerStatus?.intraday_done_today ? 'text-emerald-400' : 'text-slate-500'}`}>
+                {schedulerStatus?.intraday_done_today ? '완료' : '미완료'}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-[#0d1117] rounded-xl p-3">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">AI 예측</div>
+            <div className="flex items-center gap-2">
+              {schedulerStatus?.inference_done_today ? (
+                <CheckCircle className="w-4 h-4 text-emerald-400" />
+              ) : (
+                <XCircle className="w-4 h-4 text-slate-500" />
+              )}
+              <span className={`text-sm font-bold ${schedulerStatus?.inference_done_today ? 'text-emerald-400' : 'text-slate-500'}`}>
+                {schedulerStatus?.inference_done_today ? '완료' : '미완료'}
+              </span>
+            </div>
+          </div>
+
+          <div className="bg-[#0d1117] rounded-xl p-3">
+            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">마지막 체크</div>
+            <div className="text-sm font-bold text-slate-300">
+              {schedulerStatus?.last_check_date || '-'}
+            </div>
+          </div>
+        </div>
+
+        {schedulerStatus?.crawling_error && (
+          <div className="mt-4 p-3 bg-rose-500/10 border border-rose-500/30 rounded-xl">
+            <div className="flex items-center gap-2 text-rose-400 text-sm font-bold">
+              <AlertCircle className="w-4 h-4" />
+              {schedulerStatus.crawling_error}
+            </div>
           </div>
         )}
       </div>
 
-      {/* Quick Stats */}
-      {investorTrends.length > 0 && (
-        <div className={`grid ${isMobile ? 'grid-cols-3 gap-2' : 'grid-cols-1 md:grid-cols-3 gap-4'}`}>
-          {(() => {
-            const latestTrend = investorTrends[0] || { individual: 0, foreign: 0, institution: 0 };
-            return (
-              <>
-                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
-                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
-                    <Users className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-amber-400`} />
-                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '개인' : '개인 순매수'}</span>
-                  </div>
-                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.individual >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.individual >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.individual / 100000000).toFixed(0)}억` : formatNumber(latestTrend.individual)}
-                  </div>
-                </div>
-                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
-                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
-                    <Globe className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-emerald-400`} />
-                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '외국인' : '외국인 순매수'}</span>
-                  </div>
-                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.foreign >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.foreign >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.foreign / 100000000).toFixed(0)}억` : formatNumber(latestTrend.foreign)}
-                  </div>
-                </div>
-                <div className={`bg-[#1a1f2e] border border-slate-800 rounded-xl ${isMobile ? 'p-2' : 'p-4'}`}>
-                  <div className={`flex items-center gap-${isMobile ? '1' : '3'} mb-2`}>
-                    <Building2 className={`${isMobile ? 'w-3 h-3' : 'w-5 h-5'} text-violet-400`} />
-                    <span className={`${isMobile ? 'text-[10px]' : 'text-sm'} font-bold text-slate-400`}>{isMobile ? '기관' : '기관 순매수'}</span>
-                  </div>
-                  <div className={`${isMobile ? 'text-sm' : 'text-xl'} font-black ${latestTrend.institution >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                    {latestTrend.institution >= 0 ? '+' : ''}{isMobile ? `${(latestTrend.institution / 100000000).toFixed(0)}억` : formatNumber(latestTrend.institution)}
-                  </div>
-                </div>
-              </>
-            );
-          })()}
+      {/* Real-time Progress Card (크롤링 중일 때만 표시) */}
+      {isCrawling && schedulerStatus?.crawl_progress && (
+        <div className={`bg-[#1a1f2e] border border-amber-500/50 rounded-2xl ${isMobile ? 'p-4' : 'p-6'} animate-pulse-slow`}>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white flex items-center gap-2`}>
+              <Activity className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-amber-400`} />
+              실시간 수집 진행률
+            </h3>
+            <span className="text-xs text-amber-400 font-bold">
+              {schedulerStatus.crawling_status?.toUpperCase()} 모드
+            </span>
+          </div>
+          
+          {/* Progress Bar */}
+          <div className="mb-4">
+            <div className="flex justify-between text-xs text-slate-400 mb-2">
+              <span>
+                {schedulerStatus.crawl_progress.current.toLocaleString()} / {schedulerStatus.crawl_progress.total.toLocaleString()} 종목
+              </span>
+              <span>
+                {schedulerStatus.crawl_progress.total > 0 
+                  ? ((schedulerStatus.crawl_progress.current / schedulerStatus.crawl_progress.total) * 100).toFixed(1)
+                  : 0}%
+              </span>
+            </div>
+            <div className="w-full h-3 bg-slate-700 rounded-full overflow-hidden">
+              <div 
+                className="h-full bg-gradient-to-r from-amber-500 to-amber-400 transition-all duration-300 ease-out"
+                style={{ 
+                  width: `${schedulerStatus.crawl_progress.total > 0 
+                    ? (schedulerStatus.crawl_progress.current / schedulerStatus.crawl_progress.total) * 100 
+                    : 0}%` 
+                }}
+              />
+            </div>
+          </div>
+          
+          {/* Stats Grid */}
+          <div className={`grid ${isMobile ? 'grid-cols-2 gap-2' : 'grid-cols-4 gap-4'}`}>
+            <div className="bg-[#0d1117] rounded-lg p-2">
+              <div className="text-[10px] text-slate-500 uppercase">현재 종목</div>
+              <div className="text-xs font-bold text-white truncate">
+                {schedulerStatus.crawl_progress.current_name || schedulerStatus.crawl_progress.current_code || '-'}
+              </div>
+            </div>
+            <div className="bg-[#0d1117] rounded-lg p-2">
+              <div className="text-[10px] text-slate-500 uppercase">성공</div>
+              <div className="text-xs font-bold text-emerald-400">
+                {schedulerStatus.crawl_progress.success_count.toLocaleString()}
+              </div>
+            </div>
+            <div className="bg-[#0d1117] rounded-lg p-2">
+              <div className="text-[10px] text-slate-500 uppercase">실패</div>
+              <div className="text-xs font-bold text-rose-400">
+                {schedulerStatus.crawl_progress.fail_count.toLocaleString()}
+              </div>
+            </div>
+            <div className="bg-[#0d1117] rounded-lg p-2">
+              <div className="text-[10px] text-slate-500 uppercase">예상 남은 시간</div>
+              <div className="text-xs font-bold text-slate-300">
+                {schedulerStatus.crawl_progress.eta_seconds 
+                  ? formatDuration(schedulerStatus.crawl_progress.eta_seconds)
+                  : '계산 중...'}
+              </div>
+            </div>
+          </div>
         </div>
       )}
+
+      {/* Quick Actions */}
+      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+        <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white mb-4 flex items-center gap-2`}>
+          <Play className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-emerald-400`} />
+          빠른 실행
+        </h3>
+        
+        <div className={`flex ${isMobile ? 'flex-col gap-2' : 'gap-3'}`}>
+          <button
+            onClick={() => handleTriggerTask('eod')}
+            disabled={isCrawling}
+            className={`flex-1 flex items-center justify-center gap-2 ${isMobile ? 'py-2 text-xs' : 'py-3 text-sm'} rounded-xl font-bold transition-all ${
+              isCrawling 
+                ? 'bg-slate-700 text-slate-500 cursor-not-allowed' 
+                : 'bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 hover:bg-emerald-500/20'
+            }`}
+          >
+            <Play className="w-4 h-4" />
+            EOD 수집
+          </button>
+          
+          <button
+            onClick={() => handleTriggerTask('intraday')}
+            disabled={isCrawling}
+            className={`flex-1 flex items-center justify-center gap-2 ${isMobile ? 'py-2 text-xs' : 'py-3 text-sm'} rounded-xl font-bold transition-all ${
+              isCrawling 
+                ? 'bg-slate-700 text-slate-500 cursor-not-allowed' 
+                : 'bg-violet-500/10 border border-violet-500/30 text-violet-400 hover:bg-violet-500/20'
+            }`}
+          >
+            <Play className="w-4 h-4" />
+            Intraday 수집
+          </button>
+          
+          <button
+            onClick={() => handleTriggerTask('inference')}
+            disabled={isCrawling}
+            className={`flex-1 flex items-center justify-center gap-2 ${isMobile ? 'py-2 text-xs' : 'py-3 text-sm'} rounded-xl font-bold transition-all ${
+              isCrawling 
+                ? 'bg-slate-700 text-slate-500 cursor-not-allowed' 
+                : 'bg-point-cyan/10 border border-point-cyan/30 text-point-cyan hover:bg-point-cyan/20'
+            }`}
+          >
+            <Play className="w-4 h-4" />
+            AI 예측
+          </button>
+        </div>
+      </div>
+
+      {/* Manual Crawl */}
+      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+        <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white mb-4 flex items-center gap-2`}>
+          <Calendar className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-amber-400`} />
+          수동 수집
+        </h3>
+        
+        <div className={`${isMobile ? 'space-y-3' : 'flex items-end gap-4'}`}>
+          <div className={`${isMobile ? '' : 'flex-1'}`}>
+            <label className="block text-xs text-slate-500 mb-1">시작 날짜</label>
+            <input
+              type="date"
+              value={startDate}
+              onChange={(e) => setStartDate(e.target.value)}
+              className="w-full bg-[#0d1117] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-point-cyan"
+            />
+          </div>
+          
+          <div className={`${isMobile ? '' : 'flex-1'}`}>
+            <label className="block text-xs text-slate-500 mb-1">종료 날짜 (선택)</label>
+            <input
+              type="date"
+              value={endDate}
+              onChange={(e) => setEndDate(e.target.value)}
+              className="w-full bg-[#0d1117] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-point-cyan"
+            />
+          </div>
+          
+          <div className={`${isMobile ? '' : 'w-32'}`}>
+            <label className="block text-xs text-slate-500 mb-1">모드</label>
+            <select
+              value={crawlMode}
+              onChange={(e) => setCrawlMode(e.target.value as 'eod' | 'intraday')}
+              className="w-full bg-[#0d1117] border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-point-cyan"
+            >
+              <option value="eod">EOD</option>
+              <option value="intraday">Intraday</option>
+            </select>
+          </div>
+          
+          <button
+            onClick={handleManualCrawl}
+            disabled={isCrawling || isStartingCrawl || !startDate}
+            className={`${isMobile ? 'w-full' : ''} flex items-center justify-center gap-2 px-6 py-2 rounded-lg font-bold transition-all ${
+              (isCrawling || !startDate) 
+                ? 'bg-slate-700 text-slate-500 cursor-not-allowed' 
+                : 'bg-amber-500 text-black hover:bg-amber-400'
+            }`}
+          >
+            {isStartingCrawl ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+            수집 시작
+          </button>
+        </div>
+      </div>
+
+      {/* Last Crawl Info */}
+      {schedulerStatus?.last_crawl_completed_at && (
+        <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+          <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white mb-4 flex items-center gap-2`}>
+            <Clock className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-slate-400`} />
+            최근 수집 정보
+          </h3>
+          
+          <div className={`grid ${isMobile ? 'grid-cols-2 gap-3' : 'grid-cols-4 gap-4'}`}>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">완료 시각</div>
+              <div className="text-sm font-bold text-slate-300">{formatDateTime(schedulerStatus.last_crawl_completed_at)}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">모드</div>
+              <div className="text-sm font-bold text-slate-300">{schedulerStatus.last_crawl_mode || '-'}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">날짜 범위</div>
+              <div className="text-sm font-bold text-slate-300">{schedulerStatus.last_crawl_date_range || '-'}</div>
+            </div>
+            <div>
+              <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">소요 시간</div>
+              <div className="text-sm font-bold text-slate-300">{formatDuration(schedulerStatus.last_crawl_duration)}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Recent Collected Dates */}
+      <div className={`bg-[#1a1f2e] border border-slate-800 rounded-2xl ${isMobile ? 'p-4' : 'p-6'}`}>
+        <h3 className={`${isMobile ? 'text-base' : 'text-lg'} font-bold text-white mb-4 flex items-center gap-2`}>
+          <FolderOpen className={`${isMobile ? 'w-4 h-4' : 'w-5 h-5'} text-point-cyan`} />
+          최근 수집된 날짜 (최근 30일)
+        </h3>
+        
+        {isLoadingDates ? (
+          <div className="flex items-center justify-center py-8 text-slate-500">
+            <Loader2 className="w-5 h-5 animate-spin mr-2" />
+            로딩 중...
+          </div>
+        ) : crawlDates.length > 0 ? (
+          <div className="flex flex-wrap gap-2">
+            {crawlDates.map((dateInfo) => (
+              <span
+                key={dateInfo.date}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold ${
+                  dateInfo.hasData
+                    ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/30'
+                    : 'bg-slate-700/50 text-slate-500 border border-slate-600'
+                }`}
+              >
+                {dateInfo.date}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <div className="text-center py-8 text-slate-500 text-sm">
+            수집된 데이터가 없습니다.
+          </div>
+        )}
+      </div>
     </div>
   );
 };

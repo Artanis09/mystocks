@@ -66,69 +66,12 @@ def send_ntfy_notification(title: str, message: str, priority: str = "default", 
 
 
 # =============================
-# 휴장일 체크 유틸리티
-# =============================
-def get_korean_holidays(year: int) -> set:
-    """한국 주식시장 휴장일 목록 반환 (공휴일 + 추가 휴장일)"""
-    # 고정 공휴일
-    holidays = {
-        f"{year}-01-01",  # 신정
-        f"{year}-03-01",  # 삼일절
-        f"{year}-05-05",  # 어린이날
-        f"{year}-06-06",  # 현충일
-        f"{year}-08-15",  # 광복절
-        f"{year}-10-03",  # 개천절
-        f"{year}-10-09",  # 한글날
-        f"{year}-12-25",  # 크리스마스
-        f"{year}-12-31",  # 연말
-    }
-    
-    # 2026년 음력 공휴일 (추정)
-    if year == 2026:
-        holidays.update([
-            "2026-01-28", "2026-01-29", "2026-01-30",  # 설날 연휴
-            "2026-02-17",  # 대체공휴일 (설날)
-            "2026-05-24",  # 부처님오신날
-            "2026-10-04", "2026-10-05", "2026-10-06",  # 추석 연휴
-        ])
-    elif year == 2025:
-        holidays.update([
-            "2025-01-28", "2025-01-29", "2025-01-30",  # 설날 연휴
-            "2025-05-05",  # 부처님오신날
-            "2025-10-05", "2025-10-06", "2025-10-07",  # 추석 연휴
-        ])
-    
-    return holidays
-
-
-def is_trading_day(check_date: date = None) -> bool:
-    """거래일 여부 확인 (주말 체크)"""
-    if check_date is None:
-        check_date = date.today()
-    
-    # 주말 체크
-    if check_date.weekday() >= 5:  # 토(5), 일(6)
-        return False
-    
-    # 휴장일 체크를 시스템이 스스로 하지 않도록 함 (사용자 요청)
-    return True
-
-
-def get_prev_trading_day(from_date: date = None) -> date:
-    """이전 거래일 반환"""
-    if from_date is None:
-        from_date = date.today()
-    
-    prev_day = from_date - timedelta(days=1)
-    while not is_trading_day(prev_day):
-        prev_day -= timedelta(days=1)
-    
-    return prev_day
-
-
-# =============================
 # 전략 상수
 # =============================
+def is_trading_day(check_date: date = None) -> bool:
+    """휴장일 체크 없이 항상 True 반환 (사용자 요청)"""
+    return True
+
 class StrategyConfig:
     """전략 파라미터 설정 (매매전략 설정 기반)"""
     # 진입 조건 (유니버스 구축용)
@@ -372,7 +315,7 @@ class AutoTradingEngine:
         
         # 상태 파일 (모의/실전 분리)
         mode_suffix = "_mock" if is_mock else "_real"
-        self.state_file = Path(f"auto_trading_state{mode_suffix}.json")
+        self.state_file = Path(os.path.join(os.path.dirname(__file__), f"auto_trading_state{mode_suffix}.json"))
         
         # 초기화
         self._init_db()
@@ -603,13 +546,15 @@ class AutoTradingEngine:
             
             # 파일에서 토큰 로드 (모의/실전 분리)
             token_suffix = "_mock" if self.is_mock else "_real"
-            token_file = Path(f"kis_token{token_suffix}.json")
+            token_file = Path(os.path.join(os.path.dirname(__file__), f"kis_token{token_suffix}.json"))
             if token_file.exists():
                 with open(token_file, 'r') as f:
                     token_data = json.load(f)
-                    if time.time() < token_data.get('expired_time', 0) - 600:
+                    # 'expired_time' 또는 'expiry' 키 모두 확인 (다른 스크립트 호환성)
+                    expiry = token_data.get('expired_time') or token_data.get('expiry') or 0
+                    if time.time() < expiry - 600:
                         self._access_token = token_data['access_token']
-                        self._token_expired = token_data['expired_time']
+                        self._token_expired = expiry
                         return self._access_token
             
             # 새 토큰 발급
@@ -629,7 +574,8 @@ class AutoTradingEngine:
                 with open(token_file, 'w') as f:
                     json.dump({
                         'access_token': self._access_token,
-                        'expired_time': self._token_expired
+                        'expired_time': self._token_expired,
+                        'expiry': self._token_expired  # 호환성을 위해 둘 다 저장
                     }, f)
                 
                 self._log_event('INFO', 'TOKEN_ISSUED', '토큰 발급 성공')
@@ -729,6 +675,21 @@ class AutoTradingEngine:
             self._log_event('WARNING', 'MARKET_CAP_ERROR', f'시가총액 조회 실패: {e}', code=code)
             return 0.0
     
+    def _update_balance(self):
+        """계좌 잔고 정보만 갱신 (전체 포지션 동기화 제외)"""
+        balance = self._get_account_balance()
+        if 'error' not in balance:
+            # tot_evlu_amt(total_eval)와 nass_amt(available/net_asset) 중 큰 값을 총자산으로 간주
+            # (휴장일이나 특정 상황에서 하나가 0으로 나올 수 있음)
+            total_eval = balance.get('total_eval', 0)
+            net_asset = balance.get('available', 0)
+            
+            self.state.total_asset = max(total_eval, net_asset)
+            self.state.available_cash = balance.get('deposit', 0)  # 예수금을 매수 가능액으로 설정
+            self._last_balance_check = time.time()
+            return True
+        return False
+
     def _get_account_balance(self) -> dict:
         """계좌 잔고 조회"""
         if not self.account_no:
@@ -756,6 +717,9 @@ class AutoTradingEngine:
             tr_id=self._get_tr_id("TTTC8434R")
         )
         
+        if 'error' in result:
+            return result
+            
         output1 = result.get('output1', [])  # 보유종목
         output2 = result.get('output2', [{}])[0] if result.get('output2') else {}
         
@@ -1329,11 +1293,7 @@ class AutoTradingEngine:
         now = datetime.now()
         current_time = now.strftime('%H:%M')
         
-        # 1. 장외 시간/휴장일 체크
-        if now.weekday() >= 5 or not is_trading_day(now.date()):
-            return StrategyPhase.IDLE
-        
-        # 2. 시작 전
+        # 1. 시작 전
         if current_time < self.config.START_TIME:
             return StrategyPhase.IDLE
             
@@ -1418,10 +1378,8 @@ class AutoTradingEngine:
             return
         
         # 계좌 잔고 확인
-        balance = self._get_account_balance()
-        if 'error' not in balance:
-            self.state.total_asset = balance.get('total_eval', 0) + balance.get('deposit', 0)
-            self.state.available_cash = balance.get('available', 0)
+        if not self._update_balance():
+            self._log_event('ERROR', 'BALANCE_FAIL', '잔고 조회 실패 (API 오류)')
         
         # 미체결 주문 확인 (Restart 대응)
         for code, position in self.state.positions.items():
@@ -1548,15 +1506,10 @@ class AutoTradingEngine:
     def get_status(self) -> dict:
         """현재 상태 조회"""
         # 자산 정보 갱신 (캐시: 1분 이내면 스킵)
-        import time
         now = time.time()
         if not hasattr(self, '_last_balance_check') or now - self._last_balance_check > 60:
             try:
-                balance = self._get_account_balance()
-                if 'error' not in balance:
-                    self.state.total_asset = balance.get('total_eval', 0)  # 총평가금액 (예수금 포함)
-                    self.state.available_cash = balance.get('available', 0)
-                    self._last_balance_check = now
+                self._update_balance()
             except:
                 pass
         return self.state.to_dict()
@@ -1673,9 +1626,8 @@ class AutoTradingEngine:
             
             holdings = balance.get('holdings', {})
             
-            # 계좌 정보 업데이트
-            self.state.total_asset = balance.get('total_eval', 0)  # 총평가금액 (예수금 포함)
-            self.state.available_cash = balance.get('available', 0)
+            # 계좌 정보 업데이트 (최신화된 로직 적용)
+            self._update_balance()
             
             # 포지션 동기화
             for code, holding in holdings.items():

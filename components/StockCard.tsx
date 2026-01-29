@@ -1,7 +1,7 @@
 
 import React from 'react';
 import { StockData } from '../types';
-import { TrendingUp, TrendingDown, Users, Sparkles, X } from 'lucide-react';
+import { TrendingUp, TrendingDown, Users, Sparkles, X, Moon } from 'lucide-react';
 
 interface StockCardProps {
   stock: StockData;
@@ -96,6 +96,11 @@ export const StockCard: React.FC<StockCardProps> = ({ stock, onClick, onDelete }
           <div className="flex items-center gap-2 mb-1">
             <h3 className="font-extrabold text-white truncate group-hover:text-point-cyan transition-colors">{stock.name}</h3>
             {isProfitable && <Sparkles className="w-3 h-3 text-point-yellow animate-pulse" />}
+            {stock.is_nxt && (
+              <span className="flex items-center gap-0.5 px-1 py-0.5 bg-indigo-500/20 text-indigo-400 text-[9px] font-bold rounded" title="NXT(야간거래) 가능">
+                <Moon className="w-2.5 h-2.5" />NXT
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">{stock.symbol}</span>
@@ -104,6 +109,9 @@ export const StockCard: React.FC<StockCardProps> = ({ stock, onClick, onDelete }
               {isUp ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
               {isUp ? '+' : ''}{changePercent.toFixed(2)}%
             </span>
+            {stock.market === 'NXT' && (
+              <span className="text-[9px] font-bold text-indigo-400 bg-indigo-500/10 px-1 rounded">야간</span>
+            )}
           </div>
         </div>
         <div className="text-right">

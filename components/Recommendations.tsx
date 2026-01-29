@@ -27,6 +27,7 @@ import {
   PlusCircle
 } from 'lucide-react';
 import { RecommendedStock } from '../types';
+import { loadNxtStocks, isNxtStock, checkNxtHours } from '../services/stockService';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
@@ -153,11 +154,20 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
     error: null
   });
   
+  // NXT 상태
+  const [isNxtHours, setIsNxtHours] = useState(false);
+  
   // 정렬 상태
   const [sortConfig, setSortConfig] = useState<{ key: SortKey; direction: SortDirection }>({
     key: 'expected_return',
     direction: 'desc'
   });
+  
+  // 체크박스 다중 선택 상태
+  const [selectedStocks, setSelectedStocks] = useState<Set<string>>(new Set()); // date_code 형식
+  
+  // 자동매매 등록 여부 상태
+  const [registeredCodes, setRegisteredCodes] = useState<Set<string>>(new Set());
 
   // Refs for visibility tracking
   const stockRowRefs = useRef<Map<string, HTMLDivElement>>(new Map());
@@ -167,6 +177,31 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
 
   // 오늘 날짜
   const today = new Date().toLocaleDateString('en-CA');
+
+  // NXT 상태
+  const [nxtLoaded, setNxtLoaded] = useState(false);
+  
+  // NXT 상태 로드 및 체크
+  useEffect(() => {
+    const loadNxtData = async () => {
+      try {
+        await loadNxtStocks();
+        setNxtLoaded(true);
+        const nxtHours = await checkNxtHours();
+        setIsNxtHours(nxtHours);
+      } catch (e) {
+        console.error('NXT 데이터 로드 실패:', e);
+      }
+    };
+    loadNxtData();
+    
+    // 5분마다 NXT 상태 갱신
+    const interval = setInterval(async () => {
+      const nxtHours = await checkNxtHours();
+      setIsNxtHours(nxtHours);
+    }, 300000);
+    return () => clearInterval(interval);
+  }, []);
 
   // 스케줄러 상태 조회
   const fetchSchedulerStatus = async () => {
@@ -527,6 +562,10 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       if (response.ok) {
         const result = await response.json();
         alert(`${result.added}개 종목이 자동매매 유니버스에 등록되었습니다.`);
+        // 등록 후 등록 상태 갱신
+        await fetchRegisteredCodes();
+        // 선택 초기화
+        setSelectedStocks(new Set());
       } else {
         const errorData = await response.json();
         alert(`등록 실패: ${errorData.error || '알 수 없는 오류'}`);
@@ -535,6 +574,78 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
       console.error('Error adding to universe:', err);
       alert('등록 중 오류가 발생했습니다.');
     }
+  };
+
+  // 자동매매 등록 여부 확인 (현재 표시되는 종목들의 등록 상태 확인)
+  const fetchRegisteredCodes = useCallback(async () => {
+    const allRecommendations = recommendationsByFilter.filter2;
+    if (allRecommendations.length === 0) return;
+    
+    const codes = [...new Set(allRecommendations.map(s => s.code))];
+    try {
+      const response = await fetch(`${API_BASE_URL}/auto-trading/target-stocks/check`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ codes })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setRegisteredCodes(new Set(data.registered || []));
+      }
+    } catch (err) {
+      console.error('Error checking registered codes:', err);
+    }
+  }, [recommendationsByFilter.filter2]);
+  
+  // 추천 목록이 바뀔 때마다 등록 상태 확인
+  useEffect(() => {
+    if (recommendationsByFilter.filter2.length > 0) {
+      fetchRegisteredCodes();
+    }
+  }, [recommendationsByFilter.filter2, fetchRegisteredCodes]);
+
+  // 체크박스 전체 선택/해제 (특정 날짜)
+  const handleSelectAllForDate = (date: string, stocks: RecommendedStock[]) => {
+    setSelectedStocks(prev => {
+      const newSet = new Set(prev);
+      const stockKeys = stocks.map(s => `${s.date}_${s.code}`);
+      
+      // 해당 날짜의 모든 종목이 이미 선택되어 있는지 확인
+      const allSelected = stockKeys.every(key => prev.has(key));
+      
+      if (allSelected) {
+        // 전체 해제
+        stockKeys.forEach(key => newSet.delete(key));
+      } else {
+        // 전체 선택
+        stockKeys.forEach(key => newSet.add(key));
+      }
+      return newSet;
+    });
+  };
+
+  // 체크박스 개별 선택/해제
+  const handleSelectStock = (date: string, code: string) => {
+    const key = `${date}_${code}`;
+    setSelectedStocks(prev => {
+      const newSet = new Set(prev);
+      if (prev.has(key)) {
+        newSet.delete(key);
+      } else {
+        newSet.add(key);
+      }
+      return newSet;
+    });
+  };
+
+  // 선택된 종목들 일괄 등록
+  const handleBulkRegister = async (date: string, stocks: RecommendedStock[]) => {
+    const selectedForDate = stocks.filter(s => selectedStocks.has(`${s.date}_${s.code}`));
+    if (selectedForDate.length === 0) {
+      alert('등록할 종목을 선택해주세요.');
+      return;
+    }
+    await handleAddToUniverse(selectedForDate);
   };
 
   const handleDeleteList = async (e: React.MouseEvent, date: string, filterTag: FilterTag) => {
@@ -702,13 +813,13 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                     <button
                       onClick={(e) => {
                         e.stopPropagation();
-                        handleAddToUniverse(stocks);
+                        handleBulkRegister(date, stocks);
                       }}
                       className="p-2 hover:bg-emerald-500/10 text-slate-500 hover:text-emerald-400 rounded-lg transition-all flex items-center gap-1 text-xs font-bold"
-                      title={`${date} 모든 종목 자동매매 등록`}
+                      title={`선택한 종목 자동매매 등록`}
                     >
                       <PlusCircle className="w-4 h-4" />
-                      전체 등록
+                      선택 등록 ({stocks.filter(s => selectedStocks.has(`${s.date}_${s.code}`)).length})
                     </button>
 
                     {/* Delete Date Group Button */}
@@ -726,13 +837,23 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                     <div className="bg-[#1a1f2e] border border-slate-800 rounded-2xl overflow-hidden shadow-xl animate-in slide-in-from-top-2 duration-200">
                       {/* Table Header */}
                       <div className="grid grid-cols-12 gap-2 p-4 bg-[#151925] border-b border-slate-800 text-xs font-bold text-slate-500 uppercase tracking-wider select-none">
+                        {/* 체크박스 열 */}
+                        <div className="col-span-1 flex items-center justify-center">
+                          <input
+                            type="checkbox"
+                            checked={stocks.length > 0 && stocks.every(s => selectedStocks.has(`${s.date}_${s.code}`))}
+                            onChange={() => handleSelectAllForDate(date, stocks)}
+                            className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-point-cyan focus:ring-point-cyan focus:ring-offset-0 cursor-pointer"
+                            title="전체 선택/해제"
+                          />
+                        </div>
                         <div
                           className="col-span-3 pl-2 cursor-pointer hover:text-white flex items-center gap-1"
                           onClick={() => handleSort('name')}
                         >
                           종목명 {sortConfig.key === 'name' && <ArrowUpDown className="w-3 h-3" />}
                         </div>
-                        <div className="col-span-2 text-right">추천가</div>
+                        <div className="col-span-1 text-right">추천가</div>
                         <div
                           className="col-span-2 text-right cursor-pointer hover:text-white flex items-center justify-end gap-1"
                           onClick={() => handleSort('current_price')}
@@ -751,7 +872,7 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                         >
                           기대수익 {sortConfig.key === 'expected_return' && <ArrowUpDown className="w-3 h-3" />}
                         </div>
-                        <div className="col-span-1 text-center">삭제</div>
+                        <div className="col-span-1 text-center">액션</div>
                       </div>
 
                       {/* Table Body */}
@@ -768,15 +889,37 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                           : 0;
                         const isPositive = returnRate >= 0;
                         
+                        // NXT 거래 가능 여부 확인 (nxtLoaded가 true일 때만 isNxtStock 검사)
+                        const stockIsNxt = stock.is_nxt ?? (nxtLoaded ? isNxtStock(stock.code) : false);
+                        
+                        // 자동매매 등록 여부
+                        const isRegistered = registeredCodes.has(stock.code);
+                        
                         return (
                           <div
                             key={`${filterTag}_${stock.id || stock.code}_${idx}`}
                             ref={(el) => setStockRowRef(stock.code, el)}
                             data-code={stock.code}
                             onClick={() => onStockClick(stock)}
-                            className="grid grid-cols-12 gap-2 p-4 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group items-center"
+                            className={`grid grid-cols-12 gap-2 p-4 border-b border-slate-800/50 hover:bg-slate-800/50 cursor-pointer transition-colors group items-center ${
+                              isRegistered ? 'bg-emerald-500/5' : ''
+                            }`}
                           >
-                            {/* Name & Code with Model Badge */}
+                            {/* 체크박스 */}
+                            <div className="col-span-1 flex items-center justify-center">
+                              <input
+                                type="checkbox"
+                                checked={selectedStocks.has(`${stock.date}_${stock.code}`)}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  handleSelectStock(stock.date, stock.code);
+                                }}
+                                onClick={(e) => e.stopPropagation()}
+                                className="w-4 h-4 rounded border-slate-600 bg-slate-800 text-point-cyan focus:ring-point-cyan focus:ring-offset-0 cursor-pointer"
+                              />
+                            </div>
+
+                            {/* Name & Code with Model Badge + 등록 배지 */}
                             <div className="col-span-3 flex flex-col justify-center pl-2">
                               <div className="flex items-center gap-2">
                                 <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold flex-shrink-0 ${
@@ -791,15 +934,25 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                                     : stock.model_name === 'model1' ? 'M1' : 'M2'}
                                 </span>
                                 <span className="text-white font-bold group-hover:text-point-cyan transition-colors truncate">{stock.name}</span>
+                                {isRegistered && (
+                                  <span className="px-1.5 py-0.5 rounded text-[9px] font-bold bg-emerald-500/20 text-emerald-400 flex-shrink-0 flex items-center gap-0.5">
+                                    <CheckCircle2 className="w-2.5 h-2.5" />등록
+                                  </span>
+                                )}
                                 {stock.probability >= 0.9 && (
                                   <Zap className="w-3 h-3 text-yellow-400 fill-yellow-400 flex-shrink-0" />
+                                )}
+                                {stockIsNxt && (
+                                  <span className="flex items-center gap-0.5 px-1 py-0.5 bg-indigo-500/20 text-indigo-400 text-[8px] font-bold rounded flex-shrink-0" title="NXT(야간거래) 가능">
+                                    <Moon className="w-2 h-2" />NXT
+                                  </span>
                                 )}
                               </div>
                               <span className="text-xs text-slate-500 font-mono">{stock.code} · {formatMarketCap(stock.market_cap)}</span>
                             </div>
 
                             {/* Base Price */}
-                            <div className="col-span-2 text-right text-slate-400 font-mono text-sm">
+                            <div className="col-span-1 text-right text-slate-400 font-mono text-sm">
                               {formatPrice(stock.base_price)}원
                             </div>
 
@@ -895,8 +1048,16 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
         </div>
 
         <div className="flex flex-wrap items-center gap-2 md:gap-3">
+          {/* NXT 시간 표시 */}
+          {isNxtHours && (
+            <div className="flex items-center gap-1.5 text-xs text-indigo-400 bg-indigo-500/20 px-2 py-1 rounded-lg font-bold" title="야간거래 시간 (17:30~08:00)">
+              <Moon className="w-3 h-3" />
+              NXT
+            </div>
+          )}
+          
           {/* 장외 시간 표시 */}
-          {isAfterHours && (
+          {isAfterHours && !isNxtHours && (
             <div className="flex items-center gap-1.5 text-xs text-slate-500 bg-slate-800/50 px-2 py-1 rounded-lg">
               <Moon className="w-3 h-3" />
               장외 시간

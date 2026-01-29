@@ -12,7 +12,9 @@ import sys
 import sqlite3
 import threading
 import subprocess
-from flask import Flask, jsonify, request
+import numpy as np
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from flask import Flask, jsonify, request, Response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 import os
@@ -20,9 +22,23 @@ from pathlib import Path
 from ml.inference import run_inference, run_inference_both
 
 try:
+    import FinanceDataReader as fdr
+    FDR_AVAILABLE = True
+except ImportError:
+    FDR_AVAILABLE = False
+    print("FinanceDataReader 미설치 - 통합 크롤링 기능 비활성화")
+
+try:
     import pyarrow.parquet as pq
 except Exception:  # pragma: no cover
     pq = None
+
+try:
+    import websocket
+    WEBSOCKET_AVAILABLE = True
+except ImportError:
+    WEBSOCKET_AVAILABLE = False
+    print("websocket-client 미설치 - 웹소켓 실시간 가격 기능 비활성화")
 
 # Static folder for serving built frontend
 static_folder = os.path.join(os.path.dirname(__file__), 'static')
@@ -36,6 +52,130 @@ CORS(app)  # 모든 도메인에서 접근 허용
 _kis_api_cache = {}
 
 # =============================
+# NXT (야간거래) 종목 관리
+# =============================
+NXT_STOCKS_FILE = os.path.join(os.path.dirname(__file__), 'data', 'nxt_stocks.json')
+_nxt_stocks_cache = None
+_nxt_cache_time = 0
+
+def load_nxt_stocks() -> set:
+    """NXT 거래 가능 종목 목록 로드 (캐시 사용)"""
+    global _nxt_stocks_cache, _nxt_cache_time
+    import time as tm
+    
+    # 캐시가 1시간 이내면 재사용
+    if _nxt_stocks_cache is not None and (tm.time() - _nxt_cache_time) < 3600:
+        return _nxt_stocks_cache
+    
+    try:
+        if os.path.exists(NXT_STOCKS_FILE):
+            with open(NXT_STOCKS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                _nxt_stocks_cache = set(data.get('codes', []))
+                _nxt_cache_time = tm.time()
+                return _nxt_stocks_cache
+    except Exception as e:
+        print(f"NXT 종목 로드 실패: {e}")
+    
+    # 기본값: KOSPI200 + KOSDAQ150 주요종목 (NXT 대부분 지원)
+    # 실제로는 KIS 종목정보 파일에서 NXT 마스터를 받아야 함
+    # 임시로 시총 상위 종목들을 NXT 대상으로 가정
+    _nxt_stocks_cache = set()
+    _nxt_cache_time = tm.time()
+    return _nxt_stocks_cache
+
+def save_nxt_stocks(codes: list):
+    """NXT 종목 목록 저장"""
+    global _nxt_stocks_cache, _nxt_cache_time
+    import time as tm
+    try:
+        os.makedirs(os.path.dirname(NXT_STOCKS_FILE), exist_ok=True)
+        with open(NXT_STOCKS_FILE, 'w', encoding='utf-8') as f:
+            json.dump({'codes': codes, 'updated_at': datetime.now().isoformat()}, f, ensure_ascii=False)
+        _nxt_stocks_cache = set(codes)
+        _nxt_cache_time = tm.time()
+    except Exception as e:
+        print(f"NXT 종목 저장 실패: {e}")
+
+def is_nxt_hours() -> bool:
+    """현재 NXT 거래 시간대인지 확인 (17:30~익일 08:00)"""
+    now = datetime.now()
+    hour = now.hour
+    minute = now.minute
+    # 17:30 이후 ~ 24:00
+    if hour > 17 or (hour == 17 and minute >= 30):
+        return True
+    # 00:00 ~ 08:00
+    if hour < 8:
+        return True
+    return False
+
+def is_nxt_stock(code: str) -> bool:
+    """해당 종목이 NXT 거래 가능한지 확인 (캐시 기반)"""
+    nxt_stocks = load_nxt_stocks()
+    return str(code).zfill(6) in nxt_stocks
+
+
+def check_nxt_from_kis_api(code: str) -> bool | None:
+    """KIS API를 통해 실제 NXT 거래 가능 여부 확인
+    
+    FHKST01010100 (주식현재가 시세) API의 nxt_trd_psbl_yn 필드 사용
+    
+    참고: 2025년 3월 이후 KIS API에 nxt_trd_psbl_yn 필드가 추가됨.
+    필드가 없는 경우 None을 반환하여 기존 캐시 사용하도록 함
+    
+    Returns:
+        True: NXT 가능 (API 확인)
+        False: NXT 불가 (API 확인)  
+        None: API에서 필드를 찾을 수 없음 (캐시 사용 필요)
+    """
+    code = str(code).zfill(6)
+    try:
+        params = {
+            "fid_cond_mrkt_div_code": "J",
+            "fid_input_iscd": code
+        }
+        result = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-price", params, "FHKST01010100")
+        output = result.get("output", {})
+        
+        # nxt_trd_psbl_yn: "Y" = NXT 거래 가능, "N" = 불가
+        # 필드가 없는 경우 None 반환
+        nxt_flag = output.get("nxt_trd_psbl_yn", None)
+        
+        if nxt_flag is not None:
+            return nxt_flag == "Y"
+        
+        # nxt_trd_psbl_yn 필드가 없는 경우: None 반환 (캐시 사용)
+        return None
+        
+    except Exception as e:
+        print(f"NXT 확인 실패 for {code}: {e}")
+        return None  # fallback to cache
+
+
+def update_nxt_cache_for_code(code: str) -> bool:
+    """특정 종목의 NXT 상태를 KIS API로 확인 후 캐시 업데이트
+    
+    API에서 nxt_trd_psbl_yn 필드를 찾을 수 없으면 기존 캐시 유지
+    """
+    code = str(code).zfill(6)
+    api_result = check_nxt_from_kis_api(code)
+    
+    # API에서 명확한 결과를 얻은 경우에만 캐시 업데이트
+    if api_result is not None:
+        nxt_stocks = load_nxt_stocks()
+        if api_result and code not in nxt_stocks:
+            nxt_stocks.add(code)
+            save_nxt_stocks(list(nxt_stocks))
+        elif not api_result and code in nxt_stocks:
+            nxt_stocks.discard(code)
+            save_nxt_stocks(list(nxt_stocks))
+        return api_result
+    
+    # API에서 결과를 얻지 못한 경우 기존 캐시 사용
+    return is_nxt_stock(code)
+
+# =============================
 # 스케줄러 상태 관리
 # =============================
 _scheduler_state = {
@@ -45,7 +185,7 @@ _scheduler_state = {
     "inference_done_today": False, # Inference 실행 여부
     "auto_start_done_today": False, # 오늘 자동매매 자동시작 실행 여부
     "last_check_date": None,       # 마지막 체크 날짜
-    "crawling_status": None,       # 'eod' | 'universe' | None
+    "crawling_status": None,       # 'eod' | 'intraday' | 'universe' | None
     "crawling_start_time": None,   # 크롤링 시작 시간
     "crawling_error": None,        # 크롤링 에러 메시지
     # 최근 수집 완료 정보
@@ -56,8 +196,23 @@ _scheduler_state = {
     # 유니버스 구축 정보
     "last_universe_build_date": None, # 마지막 유니버스 구축 날짜 (YYYY-MM-DD)
     "last_universe_target_date": None, # 유니버스가 사용할 대상 날짜 (YYYY-MM-DD)
+    # 크롤링 진행률 (새로 추가)
+    "crawl_progress": {
+        "current": 0,             # 현재 완료된 종목 수
+        "total": 0,               # 전체 종목 수
+        "current_code": None,     # 현재 처리 중인 종목코드
+        "current_name": None,     # 현재 처리 중인 종목명
+        "success_count": 0,       # 성공한 종목 수
+        "fail_count": 0,          # 실패한 종목 수
+        "started_at": None,       # 수집 시작 시간
+        "eta_seconds": None,      # 예상 남은 시간 (초)
+    }
 }
 _scheduler_lock = threading.Lock()
+
+# SSE 클라이언트 관리
+_sse_clients = []
+_sse_lock = threading.Lock()
 
 # SQLite 데이터베이스 설정
 import os
@@ -69,6 +224,390 @@ db_path = os.path.join(db_dir, 'mystock.db')
 app.config['SQLALCHEMY_DATABASE_URI'] = f'sqlite:///{db_path}'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
+
+
+# =============================
+# 통합 크롤링 설정 및 코어 로직
+# =============================
+CRAWL_DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "krx", "bars")
+CRAWL_UNIVERSE_DIR = os.path.join(os.path.dirname(__file__), "data", "krx", "master", "universe_mcap500")
+CRAWL_UNIVERSE_JSON_PATH = os.path.join(os.path.dirname(__file__), "data", "user", "universe_mcap500.json")
+CRAWL_MAX_WORKERS = 8
+CRAWL_MCAP_THRESHOLD_KRW = 50_000_000_000  # 500억
+
+
+def _crawl_ensure_dir(path: str) -> None:
+    """디렉토리가 없으면 생성"""
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+
+def _crawl_zfill_code(code: str) -> str:
+    """종목코드 6자리 패딩"""
+    return str(code).zfill(6)
+
+
+def _crawl_atomic_to_parquet(df: pd.DataFrame, out_path: str) -> None:
+    """Atomic write to prevent partial writes"""
+    tmp_path = out_path + ".tmp"
+    df.to_parquet(tmp_path, index=False)
+    os.replace(tmp_path, out_path)
+
+
+def _crawl_check_network(timeout: int = 5) -> bool:
+    """네트워크 연결 확인"""
+    hosts = ["https://www.naver.com", "https://www.google.com"]
+    for host in hosts:
+        try:
+            requests.get(host, timeout=timeout)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+def _crawl_normalize_df(df: pd.DataFrame, df_krx: pd.DataFrame | None = None) -> pd.DataFrame:
+    """DataFrame 스키마 정규화"""
+    if df is None or df.empty:
+        raise ValueError("DataFrame is empty")
+    
+    out = df.copy()
+    out.columns = [str(c).lower() for c in out.columns]
+    
+    if 'code' not in out.columns:
+        if 'Code' in df.columns:
+            out = out.rename(columns={'Code': 'code'})
+        elif '단축코드' in df.columns:
+            out = out.rename(columns={'단축코드': 'code'})
+    
+    if 'code' not in out.columns and 'name' in out.columns and df_krx is not None and not df_krx.empty:
+        tmp = df_krx.copy()
+        if 'Code' in tmp.columns and 'Name' in tmp.columns:
+            tmp['Code'] = tmp['Code'].apply(_crawl_zfill_code)
+            name_to_code = dict(zip(tmp['Name'].astype(str), tmp['Code'].astype(str)))
+            out['code'] = out['name'].astype(str).map(name_to_code)
+    
+    required = ['date', 'code', 'open', 'high', 'low', 'close', 'volume']
+    missing = [c for c in required if c not in out.columns]
+    if missing:
+        raise ValueError(f"Missing columns: {missing}")
+    
+    out['code'] = out['code'].astype(str).str.zfill(6)
+    out['date'] = pd.to_datetime(out['date'], errors='coerce')
+    out = out.dropna(subset=['date', 'code'])
+    
+    for c in ['open', 'high', 'low', 'close', 'volume']:
+        out[c] = pd.to_numeric(out[c], errors='coerce')
+    
+    if 'change' in out.columns:
+        out['change'] = pd.to_numeric(out['change'], errors='coerce')
+    else:
+        out['change'] = np.nan
+    
+    if 'name' in out.columns:
+        out['name'] = out['name'].astype(str)
+    
+    ordered = ['date', 'code', 'open', 'high', 'low', 'close', 'volume', 'change']
+    if 'name' in out.columns:
+        ordered.append('name')
+    extras = [c for c in out.columns if c not in ordered]
+    return out[ordered + extras]
+
+
+def _crawl_process_single_stock(code: str, date_start: str, date_end: str, max_retries: int = 3):
+    """단일 종목 데이터 수집 (FDR 사용)"""
+    if not FDR_AVAILABLE:
+        return None
+    
+    for attempt in range(max_retries):
+        try:
+            df = fdr.DataReader(code, date_start, date_end)
+            if df.empty:
+                return None
+            
+            df = df.reset_index()
+            df.columns = [c.lower() for c in df.columns]
+            df['code'] = code
+            
+            cols = ['date', 'code', 'open', 'high', 'low', 'close', 'volume', 'change']
+            available_cols = [c for c in cols if c in df.columns]
+            
+            if 'change' not in available_cols and 'close' in df.columns:
+                df['change'] = df['close'].pct_change().fillna(0)
+                available_cols.append('change')
+            
+            return df[available_cols]
+        except Exception as e:
+            error_str = str(e).lower()
+            if any(kw in error_str for kw in ['connection', 'timeout', 'network', 'unreachable']):
+                if attempt < max_retries - 1:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+            return None
+    return None
+
+
+def _crawl_get_krx_listing(max_retries: int = 3) -> pd.DataFrame:
+    """KRX 종목 목록 조회"""
+    if not FDR_AVAILABLE:
+        raise RuntimeError("FinanceDataReader not available")
+    
+    for attempt in range(max_retries):
+        try:
+            return fdr.StockListing("KRX")
+        except Exception as e:
+            if attempt < max_retries - 1:
+                time.sleep(5 * (attempt + 1))
+                continue
+            raise
+    raise RuntimeError("Failed to fetch KRX listing")
+
+
+def _crawl_load_share_count_mapping() -> dict:
+    """상장주식수 매핑 로드"""
+    csv_path = os.path.join(os.path.dirname(__file__), "public", "korea_stocks.csv")
+    if not os.path.exists(csv_path):
+        return {}
+    try:
+        df = pd.read_csv(csv_path)
+        if "단축코드" not in df.columns or "상장주식수" not in df.columns:
+            return {}
+        df["단축코드"] = df["단축코드"].apply(lambda x: str(x).zfill(6))
+        return dict(zip(df["단축코드"], df["상장주식수"]))
+    except Exception:
+        return {}
+
+
+def _crawl_load_universe_codes() -> list:
+    """유니버스 캐시에서 종목코드 로드"""
+    latest_path = os.path.join(CRAWL_UNIVERSE_DIR, "latest.parquet")
+    if os.path.exists(latest_path):
+        try:
+            df = pd.read_parquet(latest_path)
+            if not df.empty and "code" in df.columns:
+                return df["code"].astype(str).str.zfill(6).tolist()
+        except Exception:
+            pass
+    
+    if os.path.exists(CRAWL_UNIVERSE_JSON_PATH):
+        try:
+            with open(CRAWL_UNIVERSE_JSON_PATH, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            codes = payload.get("codes", [])
+            return [str(c).zfill(6) for c in codes]
+        except Exception:
+            pass
+    return []
+
+
+def _crawl_build_universe_cache(target_date: str, bars_path: str) -> pd.DataFrame:
+    """유니버스 캐시 생성"""
+    df = pd.read_parquet(bars_path)
+    if df.empty:
+        raise ValueError("bars parquet is empty")
+    
+    df = df.copy()
+    df["code"] = df["code"].apply(_crawl_zfill_code)
+    
+    shares_map = _crawl_load_share_count_mapping()
+    if not shares_map:
+        raise ValueError("share count mapping not available")
+    
+    df["shares"] = df["code"].map(shares_map).fillna(0)
+    df["market_cap"] = df["close"].astype(float) * df["shares"].astype(float)
+    
+    uni = df.loc[df["market_cap"] >= CRAWL_MCAP_THRESHOLD_KRW, ["code", "market_cap", "close"]].copy()
+    uni.insert(0, "date", target_date)
+    uni = uni.sort_values(["market_cap", "code"], ascending=[False, True]).reset_index(drop=True)
+    return uni
+
+
+def _crawl_save_universe_cache(target_date: str, universe_df: pd.DataFrame) -> None:
+    """유니버스 캐시 저장"""
+    _crawl_ensure_dir(CRAWL_UNIVERSE_DIR)
+    dated_dir = os.path.join(CRAWL_UNIVERSE_DIR, f"date={target_date}")
+    _crawl_ensure_dir(dated_dir)
+    dated_path = os.path.join(dated_dir, "part-0000.parquet")
+    universe_df.to_parquet(dated_path, index=False)
+    
+    latest_path = os.path.join(CRAWL_UNIVERSE_DIR, "latest.parquet")
+    universe_df.to_parquet(latest_path, index=False)
+    
+    _crawl_ensure_dir(os.path.dirname(CRAWL_UNIVERSE_JSON_PATH))
+    payload = {
+        "date": target_date,
+        "threshold_krw": CRAWL_MCAP_THRESHOLD_KRW,
+        "codes": universe_df["code"].astype(str).tolist(),
+    }
+    with open(CRAWL_UNIVERSE_JSON_PATH, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _broadcast_crawl_progress():
+    """SSE로 크롤링 진행률 브로드캐스트"""
+    with _scheduler_lock:
+        progress = _scheduler_state["crawl_progress"].copy()
+        status = _scheduler_state["crawling_status"]
+    
+    data = {
+        "type": "crawl_progress",
+        "status": status,
+        "progress": progress
+    }
+    
+    with _sse_lock:
+        dead_clients = []
+        for client_queue in _sse_clients:
+            try:
+                client_queue.put(data)
+            except Exception:
+                dead_clients.append(client_queue)
+        for dead in dead_clients:
+            _sse_clients.remove(dead)
+
+
+def _update_crawl_progress(current: int, total: int, code: str = None, name: str = None, success: bool = True):
+    """크롤링 진행률 업데이트"""
+    with _scheduler_lock:
+        progress = _scheduler_state["crawl_progress"]
+        progress["current"] = current
+        progress["total"] = total
+        progress["current_code"] = code
+        progress["current_name"] = name
+        if success:
+            progress["success_count"] = progress.get("success_count", 0) + 1
+        else:
+            progress["fail_count"] = progress.get("fail_count", 0) + 1
+        
+        # ETA 계산
+        if progress["started_at"] and current > 0:
+            elapsed = (datetime.now() - datetime.fromisoformat(progress["started_at"])).total_seconds()
+            rate = current / elapsed if elapsed > 0 else 0
+            remaining = total - current
+            progress["eta_seconds"] = int(remaining / rate) if rate > 0 else None
+    
+    _broadcast_crawl_progress()
+
+
+def integrated_crawl_data(
+    target_date: str,
+    codes: list[str] | None = None,
+    merge_existing: bool = False,
+    lookback_days: int = 5,
+    workers: int = CRAWL_MAX_WORKERS
+) -> str | None:
+    """통합 크롤링 함수 (진행률 추적 포함)
+    
+    Returns: 저장된 parquet 경로 또는 None
+    """
+    if not FDR_AVAILABLE:
+        print("[Crawl] FinanceDataReader not available")
+        return None
+    
+    try:
+        df_krx = _crawl_get_krx_listing()
+    except Exception as e:
+        print(f"[Crawl] Error fetching stock listing: {e}")
+        return None
+    
+    df_krx["Code"] = df_krx["Code"].apply(_crawl_zfill_code)
+    if codes:
+        codes_set = {str(c).zfill(6) for c in codes}
+        df_krx = df_krx[df_krx["Code"].isin(codes_set)].copy()
+    
+    tickers = df_krx[["Code", "Name"]].values.tolist()
+    total = len(tickers)
+    
+    print(f"[Crawl] Starting crawl for {total} stocks with {workers} workers")
+    
+    # 진행률 초기화
+    with _scheduler_lock:
+        _scheduler_state["crawl_progress"] = {
+            "current": 0,
+            "total": total,
+            "current_code": None,
+            "current_name": None,
+            "success_count": 0,
+            "fail_count": 0,
+            "started_at": datetime.now().isoformat(),
+            "eta_seconds": None,
+        }
+    _broadcast_crawl_progress()
+    
+    save_dir = os.path.join(CRAWL_DATA_DIR, f"date={target_date}")
+    save_path = os.path.join(save_dir, "part-0000.parquet")
+    _crawl_ensure_dir(save_dir)
+    
+    start_date = (datetime.strptime(target_date, "%Y-%m-%d") - timedelta(days=lookback_days)).strftime("%Y-%m-%d")
+    end_date = target_date
+    
+    today_results: list[pd.DataFrame] = []
+    completed = 0
+    
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_to_ticker = {
+            executor.submit(_crawl_process_single_stock, t[0], start_date, end_date): t 
+            for t in tickers
+        }
+        
+        for future in as_completed(future_to_ticker):
+            ticker = future_to_ticker[future]
+            code, name = ticker[0], ticker[1]
+            completed += 1
+            
+            res_df = future.result()
+            success = False
+            
+            if res_df is not None and not res_df.empty:
+                res_df["date_str"] = res_df["date"].dt.strftime("%Y-%m-%d")
+                today_data = res_df[res_df["date_str"] == target_date].copy()
+                
+                if not today_data.empty:
+                    today_data["code"] = _crawl_zfill_code(code)
+                    today_data["name"] = name
+                    today_data = today_data.drop(columns=["date_str"])
+                    today_results.append(today_data)
+                    success = True
+            
+            # 진행률 업데이트 (10개마다 또는 마지막)
+            if completed % 10 == 0 or completed == total:
+                _update_crawl_progress(completed, total, code, name, success)
+    
+    if not today_results:
+        print(f"[Crawl] No data collected for {target_date}")
+        return None
+    
+    print(f"[Crawl] Merging {len(today_results)} results...")
+    new_df = pd.concat(today_results, ignore_index=True)
+    
+    try:
+        new_df = _crawl_normalize_df(new_df, df_krx=df_krx)
+    except Exception as e:
+        print(f"[Crawl] Error normalizing data: {e}")
+        return None
+    
+    if merge_existing and os.path.exists(save_path):
+        try:
+            old_df = pd.read_parquet(save_path)
+            if not old_df.empty:
+                old_df = old_df.copy()
+                old_df["code"] = old_df["code"].apply(_crawl_zfill_code)
+                new_df["code"] = new_df["code"].apply(_crawl_zfill_code)
+                
+                old_df = old_df.set_index("code")
+                new_df = new_df.set_index("code")
+                old_df.update(new_df)
+                merged = old_df.reset_index()
+                merged = _crawl_normalize_df(merged, df_krx=df_krx)
+                _crawl_atomic_to_parquet(merged, save_path)
+                print(f"[Crawl] Saved (merged): {save_path} ({len(merged)} stocks)")
+                return save_path
+        except Exception as e:
+            print(f"[Crawl] Merge failed, overwriting: {e}")
+    
+    _crawl_atomic_to_parquet(new_df, save_path)
+    print(f"[Crawl] Saved: {save_path} ({len(new_df)} stocks)")
+    return save_path
 
 
 # -----------------------------
@@ -515,6 +1054,295 @@ def call_kis_api(endpoint, params=None, tr_id="FHKST01010100"):
 _kis_price_cache = {}
 _kis_cache_time = {}
 
+# =============================
+# KIS 웹소켓 실시간 가격 시스템
+# =============================
+
+class KISWebSocketManager:
+    """KIS 웹소켓 기반 실시간 가격 관리자
+    
+    H0UNCNT0 (국내주식 실시간체결가) TR을 사용하여 실시간 가격을 수신합니다.
+    """
+    
+    WS_URL = "ws://ops.koreainvestment.com:21000"
+    TR_ID = "H0UNCNT0"  # 실시간 체결가
+    
+    def __init__(self):
+        self.ws = None
+        self.approval_key = None
+        self.subscribed_codes = set()
+        self.realtime_prices = {}  # {code: {price, change, changePercent, volume, timestamp}}
+        self.is_connected = False
+        self.is_running = False
+        self._lock = threading.Lock()
+        self._ws_thread = None
+        
+    def get_approval_key(self) -> str | None:
+        """웹소켓 접속키 발급"""
+        if self.approval_key:
+            return self.approval_key
+            
+        try:
+            url = "https://openapi.koreainvestment.com:9443/oauth2/Approval"
+            headers = {"content-type": "application/json"}
+            body = {
+                "grant_type": "client_credentials",
+                "appkey": APP_KEY,
+                "secretkey": APP_SECRET
+            }
+            response = requests.post(url, headers=headers, json=body, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                self.approval_key = data.get("approval_key")
+                print(f"웹소켓 접속키 발급 성공")
+                return self.approval_key
+            else:
+                print(f"웹소켓 접속키 발급 실패: {response.status_code}")
+                return None
+        except Exception as e:
+            print(f"웹소켓 접속키 발급 오류: {e}")
+            return None
+    
+    def _parse_realtime_data(self, data: str) -> dict | None:
+        """실시간 체결가 데이터 파싱 (H0UNCNT0)
+        
+        데이터 형식: MKSC_SHRN_ISCD|STCK_CNTG_HOUR|STCK_PRPR|...
+        """
+        try:
+            # 데이터가 | 로 구분되어 있음
+            parts = data.split('|')
+            if len(parts) < 20:
+                return None
+            
+            # H0UNCNT0 응답 필드 순서 (0-indexed)
+            # 0: 유가증권단축종목코드, 2: 주식현재가, 3: 전일대비부호, 4: 전일대비, 5: 전일대비율
+            # 8: 누적거래량, 12: 시가, 13: 고가, 14: 저가
+            code = parts[0]
+            
+            return {
+                "code": code,
+                "currentPrice": int(parts[2]) if parts[2] else 0,
+                "changeSign": parts[3],  # 1:상한, 2:상승, 3:보합, 4:하한, 5:하락
+                "change": int(parts[4]) if parts[4] else 0,
+                "changePercent": float(parts[5]) if parts[5] else 0.0,
+                "volume": int(parts[8]) if parts[8] else 0,
+                "open": int(parts[12]) if len(parts) > 12 and parts[12] else 0,
+                "high": int(parts[13]) if len(parts) > 13 and parts[13] else 0,
+                "low": int(parts[14]) if len(parts) > 14 and parts[14] else 0,
+                "timestamp": time.time()
+            }
+        except Exception as e:
+            print(f"실시간 데이터 파싱 오류: {e}")
+            return None
+    
+    def _on_message(self, ws, message):
+        """웹소켓 메시지 수신 콜백"""
+        try:
+            # 첫 번째 문자로 메시지 타입 구분
+            if message.startswith('{'):
+                # JSON 응답 (구독 확인 등)
+                data = json.loads(message)
+                if data.get("header", {}).get("tr_id") == self.TR_ID:
+                    print(f"구독 응답: {data.get('header', {}).get('msg1', 'OK')}")
+            else:
+                # 실시간 데이터 (| 구분)
+                # 형식: 0|H0UNCNT0|005930|... 
+                parts = message.split('|')
+                if len(parts) > 2 and parts[1] == self.TR_ID:
+                    # 실제 데이터는 3번째부터
+                    parsed = self._parse_realtime_data('|'.join(parts[2:]))
+                    if parsed:
+                        code = parsed["code"].zfill(6)
+                        with self._lock:
+                            self.realtime_prices[code] = parsed
+        except Exception as e:
+            print(f"웹소켓 메시지 처리 오류: {e}")
+    
+    def _on_error(self, ws, error):
+        """웹소켓 에러 콜백"""
+        print(f"웹소켓 에러: {error}")
+        self.is_connected = False
+    
+    def _on_close(self, ws, close_status_code, close_msg):
+        """웹소켓 연결 종료 콜백"""
+        print(f"웹소켓 연결 종료: {close_status_code} - {close_msg}")
+        self.is_connected = False
+    
+    def _on_open(self, ws):
+        """웹소켓 연결 성공 콜백"""
+        print("웹소켓 연결 성공")
+        self.is_connected = True
+        
+        # 기존 구독 종목 재등록
+        for code in list(self.subscribed_codes):
+            self._send_subscribe(code, "1")  # 1: 등록
+    
+    def _send_subscribe(self, code: str, tr_type: str = "1"):
+        """종목 구독/해제 메시지 전송
+        
+        tr_type: "1" = 등록, "2" = 해제
+        """
+        if not self.ws or not self.is_connected:
+            return False
+            
+        code = str(code).zfill(6)
+        message = {
+            "header": {
+                "approval_key": self.approval_key,
+                "custtype": "P",
+                "tr_type": tr_type,
+                "content-type": "utf-8"
+            },
+            "body": {
+                "input": {
+                    "tr_id": self.TR_ID,
+                    "tr_key": code
+                }
+            }
+        }
+        
+        try:
+            self.ws.send(json.dumps(message))
+            return True
+        except Exception as e:
+            print(f"구독 메시지 전송 실패: {e}")
+            return False
+    
+    def connect(self) -> bool:
+        """웹소켓 연결"""
+        if not WEBSOCKET_AVAILABLE:
+            print("websocket-client가 설치되지 않았습니다")
+            return False
+            
+        if self.is_connected:
+            return True
+            
+        # 접속키 발급
+        if not self.get_approval_key():
+            return False
+        
+        try:
+            self.ws = websocket.WebSocketApp(
+                self.WS_URL,
+                on_message=self._on_message,
+                on_error=self._on_error,
+                on_close=self._on_close,
+                on_open=self._on_open
+            )
+            
+            self.is_running = True
+            self._ws_thread = threading.Thread(target=self._run_forever, daemon=True)
+            self._ws_thread.start()
+            
+            # 연결 대기 (최대 5초)
+            for _ in range(50):
+                if self.is_connected:
+                    return True
+                time.sleep(0.1)
+            
+            return self.is_connected
+        except Exception as e:
+            print(f"웹소켓 연결 실패: {e}")
+            return False
+    
+    def _run_forever(self):
+        """웹소켓 이벤트 루프 (별도 스레드)"""
+        while self.is_running:
+            try:
+                self.ws.run_forever()
+            except Exception as e:
+                print(f"웹소켓 실행 오류: {e}")
+            
+            if self.is_running:
+                print("웹소켓 재연결 시도 (5초 후)...")
+                time.sleep(5)
+                self.is_connected = False
+    
+    def disconnect(self):
+        """웹소켓 연결 종료"""
+        self.is_running = False
+        if self.ws:
+            try:
+                self.ws.close()
+            except:
+                pass
+        self.is_connected = False
+        self.subscribed_codes.clear()
+    
+    def subscribe(self, code: str) -> bool:
+        """종목 구독"""
+        code = str(code).zfill(6)
+        
+        if code in self.subscribed_codes:
+            return True
+        
+        if not self.is_connected:
+            if not self.connect():
+                return False
+        
+        if self._send_subscribe(code, "1"):
+            self.subscribed_codes.add(code)
+            print(f"종목 구독: {code}")
+            return True
+        return False
+    
+    def unsubscribe(self, code: str) -> bool:
+        """종목 구독 해제"""
+        code = str(code).zfill(6)
+        
+        if code not in self.subscribed_codes:
+            return True
+        
+        if self._send_subscribe(code, "2"):
+            self.subscribed_codes.discard(code)
+            with self._lock:
+                self.realtime_prices.pop(code, None)
+            print(f"종목 구독 해제: {code}")
+            return True
+        return False
+    
+    def subscribe_multiple(self, codes: list) -> int:
+        """여러 종목 일괄 구독"""
+        success_count = 0
+        for code in codes:
+            if self.subscribe(code):
+                success_count += 1
+                time.sleep(0.1)  # Rate limit 방지
+        return success_count
+    
+    def get_price(self, code: str) -> dict | None:
+        """실시간 가격 조회 (캐시된 데이터)"""
+        code = str(code).zfill(6)
+        with self._lock:
+            return self.realtime_prices.get(code)
+    
+    def get_all_prices(self) -> dict:
+        """모든 구독 종목의 실시간 가격"""
+        with self._lock:
+            return dict(self.realtime_prices)
+    
+    def get_status(self) -> dict:
+        """웹소켓 상태 조회"""
+        return {
+            "is_connected": self.is_connected,
+            "is_running": self.is_running,
+            "subscribed_count": len(self.subscribed_codes),
+            "subscribed_codes": list(self.subscribed_codes),
+            "cached_prices_count": len(self.realtime_prices),
+            "websocket_available": WEBSOCKET_AVAILABLE
+        }
+
+
+# 전역 웹소켓 매니저 인스턴스
+_ws_manager = None
+
+def get_ws_manager() -> KISWebSocketManager:
+    """웹소켓 매니저 싱글톤 인스턴스"""
+    global _ws_manager
+    if _ws_manager is None:
+        _ws_manager = KISWebSocketManager()
+    return _ws_manager
+
 def get_kis_realtime_price(code: str) -> dict:
     """KIS API에서 실시간 시세 가져오기 (PER, PBR, EPS, 현재가, 거래량 등)"""
     code = str(code).zfill(6)
@@ -556,6 +1384,65 @@ def get_kis_realtime_price(code: str) -> dict:
         print(f"KIS 실시간 시세 조회 실패 ({code}): {e}")
     
     return data
+
+# NXT 현재가 캐시 (별도 관리)
+_nxt_price_cache = {}
+_nxt_cache_time = {}
+
+def get_nxt_realtime_price(code: str) -> dict:
+    """NXT(야간거래) 시장에서 실시간 시세 가져오기"""
+    code = str(code).zfill(6)
+    
+    # 캐시 확인 (30초 이내면 캐시 사용)
+    import time as tm
+    now = tm.time()
+    if code in _nxt_price_cache and (now - _nxt_cache_time.get(code, 0)) < 30:
+        return _nxt_price_cache[code]
+    
+    data = {}
+    try:
+        params = {
+            "fid_cond_mrkt_div_code": "NX",  # NXT 시장
+            "fid_input_iscd": code
+        }
+        result = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-price", params, "FHKST01010100")
+        output = result.get("output", {})
+        
+        if output:
+            data = {
+                "currentPrice": int(output.get("stck_prpr", 0) or 0),
+                "change": int(output.get("prdy_vrss", 0) or 0),
+                "changePercent": float(output.get("prdy_ctrt", 0) or 0),
+                "volume": int(output.get("acml_vol", 0) or 0),
+                "high": int(output.get("stck_hgpr", 0) or 0),
+                "low": int(output.get("stck_lwpr", 0) or 0),
+                "open": int(output.get("stck_oprc", 0) or 0),
+                "market": "NXT",
+            }
+            # 캐시 저장
+            _nxt_price_cache[code] = data
+            _nxt_cache_time[code] = now
+    except Exception as e:
+        print(f"NXT 실시간 시세 조회 실패 ({code}): {e}")
+    
+    return data
+
+def get_smart_realtime_price(code: str) -> dict:
+    """시간대에 따라 KRX 또는 NXT 시세를 자동 선택하여 조회"""
+    code = str(code).zfill(6)
+    
+    # NXT 시간대이고 NXT 거래 가능 종목이면 NXT 시세 조회
+    if is_nxt_hours() and is_nxt_stock(code):
+        nxt_data = get_nxt_realtime_price(code)
+        if nxt_data and nxt_data.get("currentPrice", 0) > 0:
+            nxt_data["market"] = "NXT"
+            return nxt_data
+    
+    # 기본: KRX 시세 조회
+    krx_data = get_kis_realtime_price(code)
+    if krx_data:
+        krx_data["market"] = "KRX"
+    return krx_data
 
 def get_kis_stock_info(code):
     data = {}
@@ -649,6 +1536,237 @@ def api_debug_kis_raw(code):
         return jsonify({"success": True, "code": code, "raw": raw, "parsed": parsed})
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
+
+
+# =============================
+# NXT 관련 API 엔드포인트
+# =============================
+
+@app.route('/api/nxt/stocks', methods=['GET'])
+def api_get_nxt_stocks():
+    """NXT 거래 가능 종목 목록 조회"""
+    try:
+        nxt_stocks = load_nxt_stocks()
+        return jsonify({
+            "success": True,
+            "codes": list(nxt_stocks),
+            "count": len(nxt_stocks),
+            "is_nxt_hours": is_nxt_hours()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/stocks', methods=['POST'])
+def api_set_nxt_stocks():
+    """NXT 거래 가능 종목 목록 설정"""
+    try:
+        data = request.json
+        codes = data.get('codes', [])
+        save_nxt_stocks(codes)
+        return jsonify({"success": True, "count": len(codes)})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/check/<code>', methods=['GET'])
+def api_check_nxt_stock(code):
+    """특정 종목의 NXT 거래 가능 여부 확인
+    
+    refresh=true 파라미터가 있으면 KIS API로 실시간 확인 후 캐시 업데이트
+    기본값은 캐시에서 확인 (API 호출 비용 절감)
+    """
+    try:
+        code = str(code).zfill(6)
+        refresh = request.args.get('refresh', 'false').lower() == 'true'
+        
+        if refresh:
+            # KIS API로 실제 NXT 가능 여부 확인 후 캐시 업데이트
+            is_nxt = update_nxt_cache_for_code(code)
+        else:
+            # 캐시에서 확인
+            is_nxt = is_nxt_stock(code)
+        
+        return jsonify({
+            "success": True,
+            "code": code,
+            "is_nxt": is_nxt,
+            "is_nxt_hours": is_nxt_hours(),
+            "source": "kis_api" if refresh else "cache"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/price/<code>', methods=['GET'])
+def api_get_nxt_price(code):
+    """NXT 시장 현재가 조회"""
+    try:
+        code = str(code).zfill(6)
+        
+        if not is_nxt_hours():
+            return jsonify({
+                "success": False,
+                "error": "NXT 거래 시간이 아닙니다 (17:30~익일 08:00)",
+                "is_nxt_hours": False
+            })
+        
+        price_data = get_nxt_realtime_price(code)
+        if not price_data or price_data.get("currentPrice", 0) == 0:
+            return jsonify({
+                "success": False,
+                "error": "NXT 시세를 조회할 수 없습니다",
+                "is_nxt_hours": True
+            })
+        
+        return jsonify({
+            "success": True,
+            "code": code,
+            "data": price_data,
+            "is_nxt_hours": True
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/status', methods=['GET'])
+def api_nxt_status():
+    """NXT 시장 상태 조회"""
+    try:
+        now = datetime.now()
+        return jsonify({
+            "success": True,
+            "is_nxt_hours": is_nxt_hours(),
+            "current_time": now.strftime("%H:%M:%S"),
+            "nxt_start": "17:30",
+            "nxt_end": "08:00",
+            "total_nxt_stocks": len(load_nxt_stocks())
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/stock-info-batch', methods=['POST'])
+def api_stock_info_batch():
+    """여러 종목의 정보를 일괄 조회 (NXT 정보 포함)"""
+    try:
+        data = request.json
+        codes = data.get('codes', [])
+        
+        nxt_stocks = load_nxt_stocks()
+        is_nxt_time = is_nxt_hours()
+        
+        result = {}
+        for code in codes[:50]:  # 최대 50개
+            code = str(code).zfill(6)
+            result[code] = {
+                "is_nxt": code in nxt_stocks,
+                "is_nxt_hours": is_nxt_time
+            }
+        
+        return jsonify({"success": True, "data": result})
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/init-default', methods=['POST'])
+def api_init_nxt_default():
+    """NXT 기본 종목 초기화 (KOSPI200 + KOSDAQ150 주요 종목)
+    
+    한국거래소 NXT는 KOSPI200 및 KOSDAQ150 구성 종목이 대상입니다.
+    이 엔드포인트는 로컬 tickers에서 시총 상위 종목들을 NXT 대상으로 설정합니다.
+    """
+    try:
+        # 로컬 tickers 로드
+        tickers = load_local_tickers()
+        if not tickers:
+            return jsonify({"success": False, "error": "Tickers 데이터가 없습니다"}), 400
+        
+        # 시총 상위 종목을 NXT 대상으로 설정 (약 350개 = KOSPI200 + KOSDAQ150)
+        # 실제로는 KRX에서 NXT 마스터 파일을 받아야 하지만, 임시로 시총 기준 설정
+        nxt_codes = []
+        
+        # 코스피 종목
+        kospi_codes = [code for code, info in tickers.items() if info.get('market') == 'KOSPI']
+        # 코스닥 종목
+        kosdaq_codes = [code for code, info in tickers.items() if info.get('market') == 'KOSDAQ']
+        
+        # 대표 우량종목 추가 (삼성전자, SK하이닉스, 네이버, 카카오 등)
+        default_nxt = [
+            '005930', '000660', '035420', '035720', '051910', '006400', '068270',
+            '028260', '012330', '066570', '003550', '105560', '055550', '000270',
+            '005380', '017670', '005490', '096770', '034730', '032830', '015760',
+            '003490', '207940', '259960', '247540', '086520', '034020', '036570'
+        ]
+        nxt_codes.extend(default_nxt)
+        
+        # 코스피 상위 200개 추가 (단순 코드 순)
+        nxt_codes.extend(kospi_codes[:200])
+        # 코스닥 상위 150개 추가
+        nxt_codes.extend(kosdaq_codes[:150])
+        
+        # 중복 제거
+        nxt_codes = list(set(nxt_codes))
+        
+        save_nxt_stocks(nxt_codes)
+        
+        return jsonify({
+            "success": True, 
+            "count": len(nxt_codes),
+            "message": f"NXT 종목 {len(nxt_codes)}개 초기화 완료"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/nxt/verify', methods=['POST'])
+def api_verify_nxt_stocks():
+    """지정된 종목들의 NXT 거래 가능 여부를 KIS API로 실제 확인
+    
+    Request body: { "codes": ["005930", "000660", ...] }
+    각 종목에 대해 KIS API의 nxt_trd_psbl_yn 필드를 확인합니다.
+    """
+    try:
+        data = request.json
+        codes = data.get('codes', [])
+        
+        if not codes:
+            return jsonify({"success": False, "error": "종목코드가 필요합니다"}), 400
+        
+        # 최대 20개로 제한 (API 호출 비용)
+        codes = codes[:20]
+        
+        results = {}
+        nxt_codes_to_add = []
+        nxt_codes_to_remove = []
+        
+        for code in codes:
+            code = str(code).zfill(6)
+            is_nxt = check_nxt_from_kis_api(code)
+            results[code] = is_nxt
+            
+            if is_nxt:
+                nxt_codes_to_add.append(code)
+            else:
+                nxt_codes_to_remove.append(code)
+        
+        # 캐시 업데이트
+        nxt_stocks = load_nxt_stocks()
+        for code in nxt_codes_to_add:
+            nxt_stocks.add(code)
+        for code in nxt_codes_to_remove:
+            nxt_stocks.discard(code)
+        save_nxt_stocks(list(nxt_stocks))
+        
+        return jsonify({
+            "success": True,
+            "results": results,
+            "verified_count": len(results),
+            "nxt_count": sum(1 for v in results.values() if v)
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
 
 @app.route('/update-stock/<code>', methods=['POST'])
 def update_single_stock(code):
@@ -947,15 +2065,24 @@ def api_etf_search():
 
 @app.route('/api/etf-lookup/<code>', methods=['GET'])
 def api_etf_lookup(code):
-    """ETF 종목코드로 직접 KIS API 조회 및 캐싱"""
+    """종목코드로 직접 KIS API 조회 및 캐싱 (ETF 및 일반주식 모두 지원)"""
     try:
         code = str(code).zfill(6)
+        
+        # 로컬 tickers에서 종목명 먼저 조회 (fallback용)
+        tickers = load_local_tickers()
+        local_name = tickers.get(code, {}).get('name', '')
+        local_market = tickers.get(code, {}).get('market', '')
         
         # 캐시 확인
         cache = load_etf_cache()
         if code in cache:
             # If cached entry lacks pricing info, try to enrich from KIS realtime
             entry = cache.get(code, {}) if isinstance(cache, dict) else {}
+            # 캐시된 이름이 ETF-XXX 형태면 로컬 이름으로 업데이트
+            if entry.get('name', '').startswith('ETF-') and local_name:
+                entry['name'] = local_name
+                entry['market'] = local_market or entry.get('market', 'STOCK')
             needs_enrich = ('currentPrice' not in entry) or (entry.get('currentPrice') in (None, 0))
             if needs_enrich:
                 try:
@@ -975,21 +2102,38 @@ def api_etf_lookup(code):
         
         # accept zero currentPrice as valid (don't treat 0 as missing)
         if not kis_data or ('currentPrice' not in kis_data):
+            # KIS API 실패해도 로컬 종목 정보가 있으면 반환
+            if local_name:
+                stock_info = {
+                    "name": local_name,
+                    "code": code,
+                    "market": local_market or "STOCK",
+                    "currentPrice": 0,
+                    "change": 0,
+                    "changePercent": 0,
+                    "volume": 0,
+                    "marketCap": 0,
+                }
+                cache[code] = stock_info
+                save_etf_cache(cache)
+                return jsonify({"success": True, "code": code, "data": stock_info, "cached": False})
             return jsonify({"success": False, "error": "종목 정보를 찾을 수 없습니다", "data": None})
         
-        # 종목명 조회를 위해 다른 API 시도
-        name_params = {
-            "fid_cond_mrkt_div_code": "J",
-            "fid_input_iscd": code
-        }
-        name_result = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-price", name_params, "FHKST01010100")
-        name_output = name_result.get("output", {})
-        stock_name = name_output.get("hts_kor_isnm", f"ETF-{code}")
+        # 종목명: 로컬 이름 우선, 없으면 KIS API 조회
+        stock_name = local_name
+        if not stock_name:
+            name_params = {
+                "fid_cond_mrkt_div_code": "J",
+                "fid_input_iscd": code
+            }
+            name_result = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-price", name_params, "FHKST01010100")
+            name_output = name_result.get("output", {})
+            stock_name = name_output.get("hts_kor_isnm", f"종목-{code}")
         
-        etf_info = {
+        stock_info = {
             "name": stock_name,
             "code": code,
-            "market": "ETF",
+            "market": local_market or "STOCK",
             "currentPrice": kis_data.get('currentPrice', 0),
             "change": kis_data.get('change', 0),
             "changePercent": kis_data.get('changePercent', 0),
@@ -1000,11 +2144,26 @@ def api_etf_lookup(code):
             "eps": kis_data.get('eps', 0),
         }
         
+        # NXT 여부 확인 (KIS API 응답에서 nxt_trd_psbl_yn 확인, 없으면 기존 캐시 사용)
+        api_nxt = check_nxt_from_kis_api(code)
+        is_nxt = api_nxt if api_nxt is not None else is_nxt_stock(code)
+        stock_info["is_nxt"] = is_nxt
+        
+        # NXT 캐시 업데이트 (API에서 명확한 결과를 얻은 경우에만)
+        if api_nxt is not None:
+            nxt_stocks = load_nxt_stocks()
+            if api_nxt and code not in nxt_stocks:
+                nxt_stocks.add(code)
+                save_nxt_stocks(list(nxt_stocks))
+            elif not api_nxt and code in nxt_stocks:
+                nxt_stocks.discard(code)
+                save_nxt_stocks(list(nxt_stocks))
+        
         # 캐시 저장
-        cache[code] = etf_info
+        cache[code] = stock_info
         save_etf_cache(cache)
         
-        return jsonify({"success": True, "code": code, "data": etf_info, "cached": False})
+        return jsonify({"success": True, "code": code, "data": stock_info, "cached": False})
     except Exception as e:
         return jsonify({"success": False, "error": str(e), "data": None})
 
@@ -1231,7 +2390,7 @@ def delete_recommendations():
         filter_tag = request.args.get('filter')
         model_name = (request.args.get('model') or 'model1').lower()
 
-        allowed_models = {'model1', 'model5'}
+        allowed_models = {'model1', 'model5', 'both'}
         if model_name not in allowed_models:
             return jsonify({"error": f"Unsupported model: {model_name}. Allowed: {sorted(allowed_models)}"}), 400
         
@@ -1241,13 +2400,16 @@ def delete_recommendations():
         q = Recommendation.query.filter_by(date=date_str)
         if filter_tag:
             q = q.filter_by(filter_tag=filter_tag)
-        if model_name:
+        
+        # model=both인 경우 모든 모델 삭제, 아니면 특정 모델만
+        if model_name != 'both':
             q = q.filter_by(model_name=model_name)
             
         count = q.delete()
         db.session.commit()
         
-        return jsonify({"message": f"Deleted {count} recommendations for {date_str} ({filter_tag or 'all filters'} / {model_name})"})
+        model_desc = 'all models' if model_name == 'both' else model_name
+        return jsonify({"message": f"Deleted {count} recommendations for {date_str} ({filter_tag or 'all filters'} / {model_desc})"})
     except Exception as e:
         db.session.rollback()
         return jsonify({"error": str(e)}), 500
@@ -2891,7 +4053,7 @@ def test_notification_api():
 
 
 def run_crawl_eod(max_retries: int = 3):
-    """EOD 모드로 크롤링 실행 (유니버스 캐시 생성) - 네트워크 오류 시 재시도"""
+    """EOD 모드로 크롤링 실행 (통합 크롤링 사용) - 진행률 추적 포함"""
     global _scheduler_state
     start_time = datetime.now()
     target_date = datetime.now().strftime('%Y-%m-%d')
@@ -2901,7 +4063,7 @@ def run_crawl_eod(max_retries: int = 3):
         _scheduler_state["crawling_start_time"] = start_time.isoformat()
         _scheduler_state["crawling_error"] = None
     
-    print("[Scheduler] Starting EOD crawl (--mode eod --workers 2 --merge)...")
+    print("[Scheduler] Starting EOD crawl (integrated, workers=2, merge=True)...")
     
     for attempt in range(max_retries):
         # 네트워크 연결 확인
@@ -2910,59 +4072,50 @@ def run_crawl_eod(max_retries: int = 3):
             with _scheduler_lock:
                 _scheduler_state["crawling_error"] = "Network connection failed"
             if attempt < max_retries - 1:
-                time.sleep(30)  # 30초 후 재시도
+                time.sleep(30)
                 continue
             break
         
         try:
-            result = subprocess.run(
-                [sys.executable, "crawl.py", "--mode", "eod", "--workers", "2", "--merge"],
-                cwd=os.path.dirname(__file__) or ".",
-                capture_output=True,
-                text=True,
-                timeout=3600  # 1시간 타임아웃
+            # 통합 크롤링 함수 사용
+            saved_path = integrated_crawl_data(
+                target_date=target_date,
+                codes=None,  # 전체 종목
+                merge_existing=True,
+                lookback_days=5,
+                workers=2
             )
+            
             end_time = datetime.now()
             duration_seconds = (end_time - start_time).total_seconds()
             
-            if result.returncode == 0:
-                # 파티션 무결성 검증
-                partition_ok = _verify_partition_integrity(target_date)
-                if not partition_ok:
-                    print(f"[Scheduler] Partition integrity check failed, attempting repair...")
-                    _repair_partition_if_needed(target_date)
+            if saved_path:
+                # 유니버스 캐시 생성
+                try:
+                    universe_df = _crawl_build_universe_cache(target_date, saved_path)
+                    _crawl_save_universe_cache(target_date, universe_df)
+                    print(f"[Scheduler] Universe cache created: {len(universe_df)} stocks")
+                except Exception as e:
+                    print(f"[Scheduler] Universe cache build failed: {e}")
                 
                 print("[Scheduler] EOD crawl completed successfully.")
-                send_ntfy_notification("데이터수집 완료 (EOD 모드)")
+                send_ntfy_notification(f"데이터수집 완료 (EOD 모드) - {_scheduler_state['crawl_progress']['success_count']}종목")
                 with _scheduler_lock:
                     _scheduler_state["eod_done_today"] = True
                     _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
                     _scheduler_state["last_crawl_mode"] = "eod (auto)"
                     _scheduler_state["last_crawl_date_range"] = target_date
                     _scheduler_state["last_crawl_duration"] = duration_seconds
-                    _scheduler_state["crawling_status"] = None  # 크롤링 완료 시 상태 리셋
+                    _scheduler_state["crawling_status"] = None
                 return True
             else:
-                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
-                print(f"[Scheduler] EOD crawl failed (attempt {attempt + 1}): {error_msg}")
-                
-                # 네트워크 관련 에러인지 확인
-                if any(keyword in error_msg.lower() for keyword in ['network', 'connection', 'timeout', 'unreachable']):
-                    print(f"[Scheduler] Network error detected, will retry...")
-                    if attempt < max_retries - 1:
-                        time.sleep(30)
-                        continue
-                
+                print(f"[Scheduler] EOD crawl failed (attempt {attempt + 1})")
                 with _scheduler_lock:
-                    _scheduler_state["crawling_error"] = error_msg
+                    _scheduler_state["crawling_error"] = "No data collected"
+                if attempt < max_retries - 1:
+                    time.sleep(30)
+                    continue
                     
-        except subprocess.TimeoutExpired:
-            print(f"[Scheduler] EOD crawl timeout (attempt {attempt + 1})")
-            with _scheduler_lock:
-                _scheduler_state["crawling_error"] = "Crawl timeout (1 hour)"
-            if attempt < max_retries - 1:
-                continue
-                
         except Exception as e:
             print(f"[Scheduler] EOD crawl exception (attempt {attempt + 1}): {e}")
             with _scheduler_lock:
@@ -2971,10 +4124,7 @@ def run_crawl_eod(max_retries: int = 3):
                 time.sleep(30)
                 continue
         
-        break  # 성공하거나 재시도 불필요한 실패 시 루프 탈출
-    
-    # 실패 시 파티션 복구 시도
-    _repair_partition_if_needed(target_date)
+        break
     
     with _scheduler_lock:
         _scheduler_state["crawling_status"] = None
@@ -3125,60 +4275,50 @@ def run_crawl_intraday(max_retries: int = 3):
             with _scheduler_lock:
                 _scheduler_state["crawling_error"] = "Network connection failed"
             if attempt < max_retries - 1:
-                time.sleep(15)  # 15초 후 재시도
+                time.sleep(15)
                 continue
             break
         
         try:
-            result = subprocess.run(
-                [sys.executable, "crawl.py", "--mode", "intraday", "--workers", "8"],
-                cwd=os.path.dirname(__file__) or ".",
-                capture_output=True,
-                text=True,
-                timeout=1800  # 30분 타임아웃
+            # 유니버스 코드 로드
+            universe_codes = _crawl_load_universe_codes()
+            if not universe_codes:
+                print("[Scheduler] No universe codes found, skipping intraday crawl")
+                with _scheduler_lock:
+                    _scheduler_state["crawling_error"] = "Universe cache not found"
+                break
+            
+            # 통합 크롤링 함수 사용
+            saved_path = integrated_crawl_data(
+                target_date=target_date,
+                codes=universe_codes,  # 유니버스 종목만
+                merge_existing=True,
+                lookback_days=5,
+                workers=8
             )
+            
             end_time = datetime.now()
             duration_seconds = (end_time - start_time).total_seconds()
             
-            if result.returncode == 0:
-                # 파티션 무결성 검증
-                partition_ok = _verify_partition_integrity(target_date)
-                if not partition_ok:
-                    print(f"[Scheduler] Partition integrity check failed, attempting repair...")
-                    _repair_partition_if_needed(target_date)
-                
+            if saved_path:
                 print("[Scheduler] Intraday crawl completed successfully.")
-                send_ntfy_notification("데이터수집 완료 (Intraday 모드)")
+                send_ntfy_notification(f"데이터수집 완료 (Intraday 모드) - {_scheduler_state['crawl_progress']['success_count']}종목")
                 with _scheduler_lock:
                     _scheduler_state["intraday_done_today"] = True
                     _scheduler_state["last_crawl_completed_at"] = end_time.isoformat()
                     _scheduler_state["last_crawl_mode"] = "intraday (auto)"
                     _scheduler_state["last_crawl_date_range"] = target_date
                     _scheduler_state["last_crawl_duration"] = duration_seconds
-                with _scheduler_lock:
                     _scheduler_state["crawling_status"] = None
                 return True
             else:
-                error_msg = result.stderr[:500] if result.stderr else "Unknown error"
-                print(f"[Scheduler] Intraday crawl failed (attempt {attempt + 1}): {error_msg}")
-                
-                # 네트워크 관련 에러인지 확인
-                if any(keyword in error_msg.lower() for keyword in ['network', 'connection', 'timeout', 'unreachable']):
-                    print(f"[Scheduler] Network error detected, will retry...")
-                    if attempt < max_retries - 1:
-                        time.sleep(15)
-                        continue
-                
+                print(f"[Scheduler] Intraday crawl failed (attempt {attempt + 1})")
                 with _scheduler_lock:
-                    _scheduler_state["crawling_error"] = error_msg
+                    _scheduler_state["crawling_error"] = "No data collected"
+                if attempt < max_retries - 1:
+                    time.sleep(15)
+                    continue
                     
-        except subprocess.TimeoutExpired:
-            print(f"[Scheduler] Intraday crawl timeout (attempt {attempt + 1})")
-            with _scheduler_lock:
-                _scheduler_state["crawling_error"] = "Crawl timeout (30 min)"
-            if attempt < max_retries - 1:
-                continue
-                
         except Exception as e:
             print(f"[Scheduler] Intraday crawl exception (attempt {attempt + 1}): {e}")
             with _scheduler_lock:
@@ -3188,9 +4328,6 @@ def run_crawl_intraday(max_retries: int = 3):
                 continue
         
         break
-    
-    # 실패 시 파티션 복구 시도
-    _repair_partition_if_needed(target_date)
     
     with _scheduler_lock:
         _scheduler_state["crawling_status"] = None
@@ -3386,6 +4523,8 @@ def get_scheduler_status():
             "last_crawl_mode": _scheduler_state["last_crawl_mode"],
             "last_crawl_date_range": _scheduler_state["last_crawl_date_range"],
             "last_crawl_duration": _scheduler_state["last_crawl_duration"],
+            # 진행률 정보 (새로 추가)
+            "crawl_progress": _scheduler_state["crawl_progress"].copy() if _scheduler_state["crawling_status"] else None,
         })
 
 
@@ -3415,7 +4554,7 @@ def trigger_scheduler_task():
 
 
 def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
-    """날짜 범위로 크롤링 실행"""
+    """날짜 범위로 크롤링 실행 (통합 크롤링 사용)"""
     global _scheduler_state
     crawl_start_time = datetime.now()
     
@@ -3426,27 +4565,62 @@ def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
     
     try:
         print(f"[Crawler] Running {mode} crawl from {start_date} to {end_date}...")
-        python_exec = sys.executable
-        cmd = [
-            python_exec, "crawl.py",
-            "--mode", mode,
-            "--start-date", start_date,
-            "--end-date", end_date,
-            "--merge"
-        ]
-        result = subprocess.run(
-            cmd,
-            cwd=os.path.dirname(__file__) or ".",
-            capture_output=True,
-            text=True,
-            timeout=3600  # 1시간 타임아웃
-        )
+        
+        # 날짜 범위 생성
+        from datetime import datetime as dt
+        start_dt = dt.strptime(start_date, "%Y-%m-%d")
+        end_dt = dt.strptime(end_date, "%Y-%m-%d")
+        
+        date_list = []
+        cur = start_dt
+        while cur <= end_dt:
+            if cur.weekday() < 5:  # 평일만
+                date_list.append(cur.strftime("%Y-%m-%d"))
+            cur += timedelta(days=1)
+        
+        if not date_list:
+            print("[Crawler] No valid dates in range")
+            with _scheduler_lock:
+                _scheduler_state["crawling_error"] = "No valid dates in range"
+            return False
+        
+        # 유니버스 코드 (intraday 모드용)
+        codes = None
+        if mode == 'intraday':
+            codes = _crawl_load_universe_codes()
+            if not codes:
+                print("[Crawler] No universe codes found")
+                with _scheduler_lock:
+                    _scheduler_state["crawling_error"] = "Universe cache not found"
+                return False
+        
+        success_count = 0
+        for target_date in date_list:
+            print(f"[Crawler] Processing {target_date}...")
+            saved_path = integrated_crawl_data(
+                target_date=target_date,
+                codes=codes,
+                merge_existing=True,
+                lookback_days=5,
+                workers=8 if mode == 'intraday' else 2
+            )
+            
+            if saved_path:
+                success_count += 1
+                # EOD 모드에서 유니버스 캐시 생성
+                if mode == 'eod':
+                    try:
+                        universe_df = _crawl_build_universe_cache(target_date, saved_path)
+                        _crawl_save_universe_cache(target_date, universe_df)
+                    except Exception as e:
+                        print(f"[Crawler] Universe cache failed for {target_date}: {e}")
+        
         crawl_end_time = datetime.now()
         duration_seconds = (crawl_end_time - crawl_start_time).total_seconds()
         
-        if result.returncode == 0:
-            print(f"[Crawler] {mode} crawl ({start_date} ~ {end_date}) completed successfully.")
-            send_ntfy_notification(f"수동 데이터수집 완료 ({mode} 모드, {start_date}~{end_date})")
+        if success_count > 0:
+            print(f"[Crawler] {mode} crawl completed: {success_count}/{len(date_list)} dates")
+            send_ntfy_notification(f"수동 데이터수집 완료 ({mode} 모드, {start_date}~{end_date}, {success_count}일)")
             with _scheduler_lock:
                 _scheduler_state["last_crawl_completed_at"] = crawl_end_time.isoformat()
                 _scheduler_state["last_crawl_mode"] = f"{mode} (manual)"
@@ -3454,10 +4628,11 @@ def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
                 _scheduler_state["last_crawl_duration"] = duration_seconds
             return True
         else:
-            print(f"[Crawler] {mode} crawl failed: {result.stderr}")
+            print(f"[Crawler] {mode} crawl failed: no data collected")
             with _scheduler_lock:
-                _scheduler_state["crawling_error"] = result.stderr[:500] if result.stderr else "Unknown error"
+                _scheduler_state["crawling_error"] = "No data collected"
             return False
+            
     except Exception as e:
         print(f"[Crawler] {mode} crawl exception: {e}")
         with _scheduler_lock:
@@ -3466,6 +4641,81 @@ def run_crawl_with_dates(start_date: str, end_date: str, mode: str = 'eod'):
     finally:
         with _scheduler_lock:
             _scheduler_state["crawling_status"] = None
+
+
+# =============================
+# SSE (Server-Sent Events) 엔드포인트
+# =============================
+import queue
+
+@app.route('/api/crawl-progress/stream')
+def crawl_progress_stream():
+    """SSE로 크롤링 진행률 스트리밍"""
+    def generate():
+        client_queue = queue.Queue()
+        
+        with _sse_lock:
+            _sse_clients.append(client_queue)
+        
+        try:
+            # 초기 상태 전송
+            with _scheduler_lock:
+                initial_data = {
+                    "type": "crawl_progress",
+                    "status": _scheduler_state["crawling_status"],
+                    "progress": _scheduler_state["crawl_progress"].copy()
+                }
+            yield f"data: {json.dumps(initial_data)}\n\n"
+            
+            while True:
+                try:
+                    # 30초마다 하트비트
+                    data = client_queue.get(timeout=30)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except queue.Empty:
+                    # 하트비트 전송
+                    yield f"data: {json.dumps({'type': 'heartbeat'})}\n\n"
+        except GeneratorExit:
+            pass
+        finally:
+            with _sse_lock:
+                if client_queue in _sse_clients:
+                    _sse_clients.remove(client_queue)
+    
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
+
+
+@app.route('/api/crawl-dates', methods=['GET'])
+def get_crawl_dates():
+    """수집된 날짜 목록 조회 API"""
+    try:
+        bars_path = os.path.join(os.path.dirname(__file__), 'data', 'krx', 'bars')
+        dates = []
+        
+        if os.path.exists(bars_path):
+            # date=YYYY-MM-DD 형태의 폴더 탐색
+            for folder in sorted(os.listdir(bars_path), reverse=True)[:30]:
+                if folder.startswith('date='):
+                    date_str = folder[5:]  # "date=" 제거
+                    folder_path = os.path.join(bars_path, folder)
+                    # 해당 폴더에 파일이 있는지 확인
+                    has_data = len([f for f in os.listdir(folder_path) if f.endswith('.parquet')]) > 0
+                    dates.append({
+                        "date": date_str,
+                        "hasData": has_data
+                    })
+        
+        return jsonify({"dates": dates})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/api/crawl', methods=['POST'])
@@ -3537,51 +4787,293 @@ def delete_single_recommendation(rec_id):
 
 @app.route('/api/realtime-prices', methods=['POST'])
 def get_realtime_prices():
-    """여러 종목의 실시간 가격을 한번에 조회 (KIS API)"""
+    """여러 종목의 실시간 가격을 한번에 조회
+    
+    웹소켓이 연결되어 있으면 웹소켓 캐시에서 즉시 반환 (초고속)
+    그렇지 않으면 REST API로 조회 (기존 방식)
+    """
     try:
         data = request.get_json() or {}
         codes = data.get('codes', [])
+        use_websocket = data.get('use_websocket', True)  # 기본값: 웹소켓 우선
         
-        if not codes or len(codes) > 20:
-            return jsonify({"error": "Provide 1-20 stock codes"}), 400
+        if not codes or len(codes) > 50:
+            return jsonify({"error": "Provide 1-50 stock codes"}), 400
+        
+        # 웹소켓 매니저 확인
+        ws_manager = get_ws_manager()
+        ws_connected = ws_manager.is_connected if use_websocket else False
+        
+        # NXT 시간대 및 종목 확인
+        nxt_hours = is_nxt_hours()
+        nxt_stocks_set = load_nxt_stocks() if nxt_hours else set()
         
         results = {}
+        rest_codes = []  # REST API로 조회할 종목
+        
         for code in codes:
             code = str(code).zfill(6)
-            try:
-                # 캐시 확인 (5초)
-                now_ts = time.time()
-                cached = _kis_api_cache.get(f"price_{code}")
-                if cached and (now_ts - cached['ts'] < 5):
+            
+            # 1. 웹소켓 캐시 확인 (연결되어 있고 구독 중인 경우)
+            if ws_connected and code in ws_manager.subscribed_codes:
+                ws_price = ws_manager.get_price(code)
+                if ws_price and (time.time() - ws_price.get('timestamp', 0)) < 60:
                     results[code] = {
-                        'current_price': cached['price'],
-                        'change_percent': cached.get('changePercent', 0),
+                        'current_price': ws_price.get('currentPrice', 0),
+                        'change_percent': ws_price.get('changePercent', 0),
+                        'market': 'KRX',
+                        'source': 'websocket'
+                    }
+                    continue
+            
+            # 2. 로컬 캐시 확인 (5초)
+            cache_key = f"price_{code}_nxt" if (nxt_hours and code in nxt_stocks_set) else f"price_{code}"
+            now_ts = time.time()
+            cached = _kis_api_cache.get(cache_key)
+            if cached and (now_ts - cached['ts'] < 5):
+                results[code] = {
+                    'current_price': cached['price'],
+                    'change_percent': cached.get('changePercent', 0),
+                    'market': cached.get('market', 'KRX'),
+                    'source': 'cache'
+                }
+                continue
+            
+            # 3. REST API 조회 대상에 추가
+            rest_codes.append(code)
+        
+        # REST API로 조회 (웹소켓에 없는 종목)
+        for code in rest_codes:
+            try:
+                kis_price = None
+                market = 'KRX'
+                
+                # NXT 시간대이고 NXT 가능 종목이면 NXT 시세 우선 조회
+                if nxt_hours and code in nxt_stocks_set:
+                    kis_price = get_nxt_realtime_price(code)
+                    if kis_price and kis_price.get('currentPrice', 0) > 0:
+                        market = 'NXT'
+                
+                # NXT 시세가 없으면 KRX 시세로 fallback
+                if not kis_price or kis_price.get('currentPrice', 0) == 0:
+                    kis_price = get_kis_realtime_price(code)
+                    market = 'KRX'
+                
+                if kis_price and kis_price.get('currentPrice', 0) > 0:
+                    current_price = float(kis_price['currentPrice'])
+                    change_percent = float(kis_price.get('changePercent', 0))
+                    cache_key = f"price_{code}_nxt" if market == 'NXT' else f"price_{code}"
+                    _kis_api_cache[cache_key] = {
+                        'price': current_price,
+                        'changePercent': change_percent,
+                        'market': market,
+                        'ts': time.time()
+                    }
+                    results[code] = {
+                        'current_price': current_price,
+                        'change_percent': change_percent,
+                        'market': market,
+                        'source': 'rest_api'
                     }
                 else:
-                    kis_price = get_kis_realtime_price(code)
-                    if kis_price and kis_price.get('currentPrice', 0) > 0:
-                        current_price = float(kis_price['currentPrice'])
-                        change_percent = float(kis_price.get('changePercent', 0))
-                        _kis_api_cache[f"price_{code}"] = {
-                            'price': current_price,
-                            'changePercent': change_percent,
-                            'ts': now_ts
-                        }
-                        results[code] = {
-                            'current_price': current_price,
-                            'change_percent': change_percent,
-                        }
-                    else:
-                        results[code] = {'current_price': None, 'change_percent': None}
+                    results[code] = {'current_price': None, 'change_percent': None, 'market': None, 'source': 'rest_api'}
             except Exception as e:
-                results[code] = {'current_price': None, 'change_percent': None, 'error': str(e)}
+                results[code] = {'current_price': None, 'change_percent': None, 'market': None, 'error': str(e)}
             
-            # KIS API rate limit 방지 (0.2초 딜레이)
-            time.sleep(0.2)
+            # KIS API rate limit 방지 (0.15초 딜레이)
+            time.sleep(0.15)
         
-        return jsonify(results)
+        return jsonify({
+            "prices": results,
+            "websocket_connected": ws_connected,
+            "websocket_subscribed": len(ws_manager.subscribed_codes) if ws_connected else 0
+        })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
+
+# =============================
+# 웹소켓 실시간 가격 API
+# =============================
+
+@app.route('/api/ws/status', methods=['GET'])
+def api_ws_status():
+    """웹소켓 연결 상태 조회"""
+    try:
+        ws_manager = get_ws_manager()
+        return jsonify({
+            "success": True,
+            **ws_manager.get_status()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/connect', methods=['POST'])
+def api_ws_connect():
+    """웹소켓 연결"""
+    try:
+        ws_manager = get_ws_manager()
+        success = ws_manager.connect()
+        return jsonify({
+            "success": success,
+            "message": "웹소켓 연결 성공" if success else "웹소켓 연결 실패",
+            **ws_manager.get_status()
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/disconnect', methods=['POST'])
+def api_ws_disconnect():
+    """웹소켓 연결 해제"""
+    try:
+        ws_manager = get_ws_manager()
+        ws_manager.disconnect()
+        return jsonify({
+            "success": True,
+            "message": "웹소켓 연결 해제됨"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/subscribe', methods=['POST'])
+def api_ws_subscribe():
+    """종목 구독 (단일 또는 다중)"""
+    try:
+        data = request.get_json() or {}
+        codes = data.get('codes', [])
+        code = data.get('code')  # 단일 종목
+        
+        if code:
+            codes = [code]
+        
+        if not codes:
+            return jsonify({"success": False, "error": "종목코드가 필요합니다"}), 400
+        
+        if len(codes) > 50:
+            return jsonify({"success": False, "error": "최대 50개 종목까지 구독 가능합니다"}), 400
+        
+        ws_manager = get_ws_manager()
+        
+        # 연결 확인
+        if not ws_manager.is_connected:
+            if not ws_manager.connect():
+                return jsonify({"success": False, "error": "웹소켓 연결 실패"}), 500
+        
+        success_count = ws_manager.subscribe_multiple(codes)
+        
+        return jsonify({
+            "success": True,
+            "requested": len(codes),
+            "subscribed": success_count,
+            "total_subscribed": len(ws_manager.subscribed_codes),
+            "message": f"{success_count}개 종목 구독 완료"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/unsubscribe', methods=['POST'])
+def api_ws_unsubscribe():
+    """종목 구독 해제"""
+    try:
+        data = request.get_json() or {}
+        codes = data.get('codes', [])
+        code = data.get('code')
+        
+        if code:
+            codes = [code]
+        
+        if not codes:
+            return jsonify({"success": False, "error": "종목코드가 필요합니다"}), 400
+        
+        ws_manager = get_ws_manager()
+        
+        for c in codes:
+            ws_manager.unsubscribe(c)
+        
+        return jsonify({
+            "success": True,
+            "unsubscribed": len(codes),
+            "total_subscribed": len(ws_manager.subscribed_codes)
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/prices', methods=['GET'])
+def api_ws_prices():
+    """웹소켓으로 수신된 모든 실시간 가격 조회"""
+    try:
+        ws_manager = get_ws_manager()
+        prices = ws_manager.get_all_prices()
+        
+        return jsonify({
+            "success": True,
+            "is_connected": ws_manager.is_connected,
+            "count": len(prices),
+            "prices": prices
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/ws/subscribe-all-registered', methods=['POST'])
+def api_ws_subscribe_all_registered():
+    """등록된 모든 종목을 웹소켓으로 구독
+    
+    자동매매 대상 종목 + AI 추천 종목을 모두 구독합니다.
+    """
+    try:
+        codes_to_subscribe = set()
+        
+        # 1. 자동매매 대상 종목
+        try:
+            auto_stocks = AutoTradingTargetStock.query.all()
+            for stock in auto_stocks:
+                codes_to_subscribe.add(stock.code)
+        except:
+            pass
+        
+        # 2. AI 추천 종목 (최근 7일)
+        try:
+            from datetime import datetime, timedelta
+            week_ago = datetime.now() - timedelta(days=7)
+            recommendations = Recommendation.query.filter(
+                Recommendation.created_at >= week_ago
+            ).all()
+            for rec in recommendations:
+                codes_to_subscribe.add(rec.code)
+        except:
+            pass
+        
+        if not codes_to_subscribe:
+            return jsonify({
+                "success": False,
+                "error": "등록된 종목이 없습니다"
+            }), 400
+        
+        ws_manager = get_ws_manager()
+        
+        # 연결 확인
+        if not ws_manager.is_connected:
+            if not ws_manager.connect():
+                return jsonify({"success": False, "error": "웹소켓 연결 실패"}), 500
+        
+        codes_list = list(codes_to_subscribe)[:50]  # 최대 50개
+        success_count = ws_manager.subscribe_multiple(codes_list)
+        
+        return jsonify({
+            "success": True,
+            "total_found": len(codes_to_subscribe),
+            "requested": len(codes_list),
+            "subscribed": success_count,
+            "message": f"{success_count}개 종목 웹소켓 구독 완료"
+        })
+    except Exception as e:
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # =============================
@@ -4729,6 +6221,75 @@ def api_clear_target_stocks():
     except Exception as e:
         print(f"자동매매 대상 종목 전체 삭제 오류: {e}")
         db.session.rollback()
+        return jsonify({"success": False, "error": str(e)}), 500
+
+
+@app.route('/api/auto-trading/target-stocks/check', methods=['POST'])
+def api_check_target_stocks():
+    """자동매매 등록 여부 확인 (종목 코드 목록을 받아서 등록된 코드 반환)"""
+    try:
+        data = request.get_json()
+        codes = data.get('codes', [])
+        if not codes:
+            return jsonify({"success": True, "registered": []})
+        
+        # DB에서 등록된 코드 확인
+        registered_stocks = AutoTradingTargetStock.query.filter(
+            AutoTradingTargetStock.code.in_(codes)
+        ).all()
+        registered_codes = [s.code for s in registered_stocks]
+        
+        return jsonify({"success": True, "registered": registered_codes})
+    except Exception as e:
+        print(f"자동매매 등록 확인 오류: {e}")
+        return jsonify({"success": False, "error": str(e), "registered": []}), 500
+
+
+@app.route('/api/auto-trading/positions/reentry', methods=['POST'])
+def api_auto_trading_reentry():
+    """청산완료된 종목 재진입 (동일 비율로)"""
+    try:
+        from auto_trading_strategy1 import PositionState
+        
+        data = request.get_json()
+        code = data.get('code')
+        if not code:
+            return jsonify({"success": False, "error": "code required"}), 400
+        
+        engine = get_auto_trading_engine()
+        
+        # 해당 종목이 CLOSED 상태인지 확인
+        if code not in engine.state.positions:
+            return jsonify({"success": False, "error": "Position not found"}), 404
+        
+        pos = engine.state.positions[code]
+        if pos.state != PositionState.CLOSED:
+            return jsonify({"success": False, "error": f"Position state is {pos.state.name}, not CLOSED"}), 400
+        
+        # 상태를 IDLE로 리셋하여 재감시 대상에 포함시킴
+        pos.state = PositionState.IDLE
+        pos.quantity = 0
+        pos.pending_quantity = 0
+        pos.entry_price = 0
+        pos.current_price = 0
+        pos.unrealized_pnl = 0
+        pos.unrealized_pnl_rate = 0
+        pos.order_id = None
+        pos.gap_confirms = 0
+        pos.entry_time = None
+        pos.exit_time = None
+        pos.exit_reason = None
+        pos.error_message = None
+        pos.retry_count = 0
+        
+        engine._save_state()
+        
+        return jsonify({
+            "success": True, 
+            "message": f"{pos.name or code} 종목이 재진입 대기 상태로 변경되었습니다."
+        })
+    except Exception as e:
+        print(f"재진입 오류: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 

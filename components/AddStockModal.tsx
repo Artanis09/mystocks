@@ -58,16 +58,30 @@ export const AddStockModal: React.FC<AddStockModalProps> = ({ onClose, onAdd, ex
           const code = isCode ? name : null;
           
           if (isCode) {
-            // 종목코드로 직접 조회
+            // 1차: KIS API로 종목코드 직접 조회 (ETF/일반주식 모두 가능)
             const etfInfo = await lookupETFByCode(code);
             if (etfInfo) {
               matchedStocks.push({
                 symbol: etfInfo.code,
                 name: etfInfo.name,
               });
-              console.log(`종목 조회 성공: ${etfInfo.name} (${etfInfo.code})`);
+              console.log(`종목 조회 성공 (KIS API): ${etfInfo.name} (${etfInfo.code})`);
               continue;
             }
+            
+            // 2차: KIS API 실패 시 CSV에서 종목코드로 검색
+            const csvMatch = searchStocks(code);
+            if (csvMatch.length > 0 && csvMatch[0].code === code) {
+              matchedStocks.push({
+                symbol: csvMatch[0].code,
+                name: csvMatch[0].name,
+              });
+              console.log(`종목 조회 성공 (CSV): ${csvMatch[0].name} (${csvMatch[0].code})`);
+              continue;
+            }
+            
+            console.warn(`"${name}" 종목코드를 찾을 수 없습니다.`);
+            continue;
           }
           
           // ETF 이름으로 검색 - korea_etf.csv에서 검색

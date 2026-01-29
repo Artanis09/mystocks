@@ -98,6 +98,9 @@ export interface StockData {
   foreignOwnership: number;
   volumeRatio?: number;  // 전 거래일 대비 거래량 비율 (%)
   returnRate?: number;
+  // NXT 관련 필드
+  is_nxt?: boolean;        // NXT 거래 가능 여부
+  market?: 'KRX' | 'NXT';  // 현재 시세 출처
   totalProfit?: number;
   avgBuyPrice?: number;
   remainingQuantity?: number;
@@ -156,6 +159,9 @@ export interface RecommendedStock {
   return_rate?: number;
   ai_analysis?: string;
   ai_service?: string;
+  // NXT 관련 필드
+  is_nxt?: boolean;        // NXT 거래 가능 여부
+  market?: 'KRX' | 'NXT';  // 현재 시세 출처
 }
 
 // Navigation
@@ -208,6 +214,9 @@ export interface AutoTradingStock {
   source: 'manual' | 'ai_model1' | 'ai_model2';  // 추가 출처
   probability?: number;  // AI 모델 확률 (AI 출처인 경우)
   modelName?: string;    // 모델명
+  // NXT 관련 필드
+  is_nxt?: boolean;        // NXT 거래 가능 여부
+  market?: 'KRX' | 'NXT';  // 현재 시세 출처
 }
 
 // 기본 전략 설정

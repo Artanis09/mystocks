@@ -37,7 +37,8 @@ import {
   PlusCircle,
   Trash2,
   X,
-  Save
+  Save,
+  Moon
 } from 'lucide-react';
 import { 
   AutoTradingStock, 
@@ -46,7 +47,7 @@ import {
   SellCondition,
   DEFAULT_TRADING_STRATEGY 
 } from '../types';
-import { loadStockList, searchStocks } from '../services/stockService';
+import { loadStockList, searchStocks, loadNxtStocks, isNxtStock, checkNxtHours } from '../services/stockService';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
@@ -315,6 +316,10 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
   });
   const [isLoadingSettings, setIsLoadingSettings] = useState(false);
   
+  // NXT 상태
+  const [isNxtHours, setIsNxtHours] = useState(false);
+  const [nxtLoaded, setNxtLoaded] = useState(false);
+  
   // UI 상태
   const [showLogs, setShowLogs] = useState(false);
   const [showConfig, setShowConfig] = useState(false);
@@ -346,6 +351,28 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
   const [editTakeProfit, setEditTakeProfit] = useState('10');
   const [editStopLoss, setEditStopLoss] = useState('-3');
   const [isUpdatingConfig, setIsUpdatingConfig] = useState(false);
+  
+  // NXT 상태 로드
+  useEffect(() => {
+    const loadNxtData = async () => {
+      try {
+        await loadNxtStocks();
+        setNxtLoaded(true);
+        const nxtHours = await checkNxtHours();
+        setIsNxtHours(nxtHours);
+      } catch (e) {
+        console.error('NXT 데이터 로드 실패:', e);
+      }
+    };
+    loadNxtData();
+    
+    // 5분마다 NXT 상태 갱신
+    const interval = setInterval(async () => {
+      const nxtHours = await checkNxtHours();
+      setIsNxtHours(nxtHours);
+    }, 300000);
+    return () => clearInterval(interval);
+  }, []);
   
   // 모드 전환
   const [isSwitchingMode, setIsSwitchingMode] = useState(false);
@@ -512,7 +539,12 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
       return;
     }
     
-    const code = newStockCode.trim().toUpperCase();
+    // 종목코드 6자리 패딩 (숫자만 있는 경우)
+    let code = newStockCode.trim();
+    if (/^\d+$/.test(code)) {
+      code = code.padStart(6, '0');
+    }
+    code = code.toUpperCase();
     
     // 중복 체크
     if (tradingStocks.some(s => s.code === code)) {
@@ -522,19 +554,21 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
     
     setIsSearchingStock(true);
     try {
-      // 종목 정보 조회
-      const response = await fetch(`${API_BASE_URL}/stock/${code}`);
+      // 종목 정보 조회 (etf-lookup API 사용 - ETF/일반주식 모두 지원)
+      const response = await fetch(`${API_BASE_URL}/etf-lookup/${code}`);
       if (response.ok) {
-        const data = await response.json();
-        const newStock: AutoTradingStock = {
-          code: code,
-          name: data.name || code,
-          basePrice: data.close || data.current_price || 0,
-          currentPrice: data.current_price,
-          marketCap: data.market_cap || 0,
-          addedDate: new Date().toISOString(),
-          source: 'manual',
-        };
+        const result = await response.json();
+        if (result.success && result.data) {
+          const data = result.data;
+          const newStock: AutoTradingStock = {
+            code: code,
+            name: data.name || code,
+            basePrice: data.currentPrice || 0,
+            currentPrice: data.currentPrice || 0,
+            marketCap: data.marketCap || 0,
+            addedDate: new Date().toISOString(),
+            source: 'manual',
+          };
         
         // 서버에 저장
         const success = await saveTargetStocksToServer([newStock]);
@@ -544,6 +578,9 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
           setShowAddStock(false);
         } else {
           alert('종목 저장에 실패했습니다.');
+        }
+        } else {
+          alert('종목 정보를 찾을 수 없습니다.');
         }
       } else {
         alert('종목 정보를 찾을 수 없습니다.');
@@ -1013,6 +1050,14 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
         </div>
 
         <div className="flex flex-wrap items-center gap-2 md:gap-3">
+          {/* NXT 상태 표시 */}
+          {isNxtHours && (
+            <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold bg-indigo-500/20 text-indigo-400" title="야간거래 시간 (17:30~08:00)">
+              <Moon className="w-4 h-4" />
+              NXT
+            </span>
+          )}
+          
           {/* 휴장일 표시 */}
           {isTradingDay === false && (
             <span className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-bold bg-amber-500/20 text-amber-400">
@@ -1875,7 +1920,14 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                       pos.state === 'ERROR' ? 'bg-rose-500/5' : ''
                     }`}>
                       <td className="py-3 px-4">
-                        <div className="font-bold text-white">{pos.name || pos.code}</div>
+                        <div className="flex items-center gap-2">
+                          <div className="font-bold text-white">{pos.name || pos.code}</div>
+                          {nxtLoaded && isNxtStock(pos.code) && (
+                            <span className="flex items-center gap-0.5 px-1 py-0.5 bg-indigo-500/20 text-indigo-400 text-[8px] font-bold rounded" title="NXT(야간거래) 가능">
+                              <Moon className="w-2 h-2" />NXT
+                            </span>
+                          )}
+                        </div>
                         <div className="text-xs text-slate-500">{pos.code}</div>
                       </td>
                       <td className="py-3 px-4"><StateBadge state={pos.state} /></td>
@@ -1935,6 +1987,34 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                               className="bg-rose-500/10 hover:bg-rose-500 text-rose-400 hover:text-white border border-rose-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
                             >
                               청산
+                            </button>
+                          )}
+                          {pos.state === 'CLOSED' && (
+                            <button
+                              onClick={async () => {
+                                if (confirm(`${pos.name || pos.code} 종목을 동일 비율로 재진입 대기 상태로 변경하시겠습니까?`)) {
+                                  try {
+                                    const res = await fetch('/api/auto-trading/positions/reentry', {
+                                      method: 'POST',
+                                      headers: { 'Content-Type': 'application/json' },
+                                      body: JSON.stringify({ code: pos.code })
+                                    });
+                                    const data = await res.json();
+                                    if (data.success) {
+                                      alert(data.message);
+                                      fetchStatus();
+                                    } else {
+                                      alert(`재진입 실패: ${data.error}`);
+                                    }
+                                  } catch (err) {
+                                    console.error('재진입 오류:', err);
+                                    alert('재진입 처리 중 오류가 발생했습니다.');
+                                  }
+                                }
+                              }}
+                              className="bg-violet-500/10 hover:bg-violet-500 text-violet-400 hover:text-white border border-violet-500/30 px-2 py-1 rounded-lg text-xs font-bold transition-all"
+                            >
+                              재진입
                             </button>
                           )}
                           {pos.state === 'ERROR' && (

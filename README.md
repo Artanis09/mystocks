@@ -28,3 +28,6 @@
 
 ## 사용법 및 매뉴얼 (User Manual)
 **프로젝트 설정, API 키 입력 위치, ML 모델 학습 등 상세한 사용 방법은 [USER_MANUAL.md](USER_MANUAL.md) 파일을 참고하세요.**
+
+## 개발/유지보수 히스토리 (Agent Context)
+AI 에이전트나 개발자가 이전 작업 내역을 파악하려면 [AGENT_HANDOVER.md](AGENT_HANDOVER.md) 파일을 확인하세요.
