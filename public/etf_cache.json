@@ -25,5 +25,15 @@
     "pbr": 1.35,
     "eps": 564.0,
     "is_nxt": false
+  },
+  "056190": {
+    "name": "에스에프에이",
+    "code": "056190",
+    "market": "KOSDAQ GLOBAL",
+    "currentPrice": 0,
+    "change": 0,
+    "changePercent": 0,
+    "volume": 0,
+    "marketCap": 0
   }
 }

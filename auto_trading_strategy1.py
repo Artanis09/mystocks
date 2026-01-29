@@ -134,6 +134,7 @@ class StrategyPhase(Enum):
 # 데이터 클래스 정의
 # =============================
 @dataclass
+@dataclass
 class UniverseStock:
     """유니버스 종목 정보"""
     code: str
@@ -143,6 +144,7 @@ class UniverseStock:
     change_rate: float          # 전일 등락률
     market_cap: float           # 시가총액 (억원)
     added_date: str             # 유니버스 편입일
+    is_nxt: bool = False        # NXT 거래 가능 여부
 
 
 @dataclass
@@ -177,6 +179,9 @@ class Position:
     exit_time: str = ""         # 청산 시간
     exit_reason: str = ""       # 청산 사유 (TP/SL/EOD/MANUAL)
     
+    # 장치 정보
+    is_nxt: bool = False        # NXT 거래 가능 여부
+    
     # 오류 정보
     error_message: str = ""
     retry_count: int = 0
@@ -202,6 +207,7 @@ class Position:
             'entry_time': self.entry_time,
             'exit_time': self.exit_time,
             'exit_reason': self.exit_reason,
+            'is_nxt': self.is_nxt,
             'error_message': self.error_message,
             'retry_count': self.retry_count
         }
@@ -226,6 +232,7 @@ class Position:
         pos.entry_time = data.get('entry_time', '')
         pos.exit_time = data.get('exit_time', '')
         pos.exit_reason = data.get('exit_reason', '')
+        pos.is_nxt = data.get('is_nxt', False)
         pos.error_message = data.get('error_message', '')
         pos.retry_count = data.get('retry_count', 0)
         return pos
@@ -905,14 +912,14 @@ class AutoTradingEngine:
             
             # 서버 저장소(auto_trading_target_stock)에서 종목 조회
             cursor.execute("""
-                SELECT code, name, base_price, market_cap FROM auto_trading_target_stock
+                SELECT code, name, base_price, market_cap, is_nxt FROM auto_trading_target_stock
             """)
             
             rows = cursor.fetchall()
             conn.close()
             
             for row in rows:
-                code, name, base_price, market_cap = row
+                code, name, base_price, market_cap, is_nxt = row
                 
                 universe.append(UniverseStock(
                     code=code,
@@ -921,7 +928,8 @@ class AutoTradingEngine:
                     prev_high=0.0,
                     change_rate=0.0,
                     market_cap=market_cap or 0.0,
-                    added_date=self.state.today
+                    added_date=self.state.today,
+                    is_nxt=bool(is_nxt)
                 ))
             
             self._log_event('INFO', 'UNIVERSE_COMPLETE', 

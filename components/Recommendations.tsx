@@ -27,7 +27,7 @@ import {
   PlusCircle
 } from 'lucide-react';
 import { RecommendedStock } from '../types';
-import { loadNxtStocks, isNxtStock, checkNxtHours } from '../services/stockService';
+import { checkNxtHours } from '../services/stockService';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
@@ -185,8 +185,6 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
   useEffect(() => {
     const loadNxtData = async () => {
       try {
-        await loadNxtStocks();
-        setNxtLoaded(true);
         const nxtHours = await checkNxtHours();
         setIsNxtHours(nxtHours);
       } catch (e) {
@@ -889,8 +887,8 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
                           : 0;
                         const isPositive = returnRate >= 0;
                         
-                        // NXT 거래 가능 여부 확인 (nxtLoaded가 true일 때만 isNxtStock 검사)
-                        const stockIsNxt = stock.is_nxt ?? (nxtLoaded ? isNxtStock(stock.code) : false);
+                        // NXT 거래 가능 여부 확인 (백엔드에서 이미 제공됨)
+                        const stockIsNxt = !!stock.is_nxt;
                         
                         // 자동매매 등록 여부
                         const isRegistered = registeredCodes.has(stock.code);

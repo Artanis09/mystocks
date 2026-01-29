@@ -47,7 +47,7 @@ import {
   SellCondition,
   DEFAULT_TRADING_STRATEGY 
 } from '../types';
-import { loadStockList, searchStocks, loadNxtStocks, isNxtStock, checkNxtHours } from '../services/stockService';
+import { loadStockList, searchStocks, checkNxtHours } from '../services/stockService';
 
 // Use relative path for API calls to work with domain/proxy
 const API_BASE_URL = '/api';
@@ -71,6 +71,8 @@ interface Position {
   exit_reason: string;
   error_message: string;
   retry_count: number;
+  is_nxt?: boolean;
+  market?: string;
 }
 
 interface UniverseStock {
@@ -233,6 +235,7 @@ const fetchTargetStocksFromServer = async (): Promise<AutoTradingStock[]> => {
     const response = await fetch('/api/auto-trading/target-stocks');
     if (response.ok) {
       const data = await response.json();
+      console.log('[NXT Debug] API 응답:', data.stocks?.map((s: any) => ({ code: s.code, is_nxt: s.is_nxt })));
       return data.stocks || [];
     }
   } catch (e) {
@@ -356,7 +359,6 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
   useEffect(() => {
     const loadNxtData = async () => {
       try {
-        await loadNxtStocks();
         setNxtLoaded(true);
         const nxtHours = await checkNxtHours();
         setIsNxtHours(nxtHours);
@@ -574,6 +576,7 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
         const success = await saveTargetStocksToServer([newStock]);
         if (success) {
           await loadTradingStocksFromServer();  // 서버에서 다시 로드
+          await fetchStatus();                  // 엔진 상태도 즉시 갱신
           setNewStockCode('');
           setShowAddStock(false);
         } else {
@@ -1026,8 +1029,51 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
     );
   }
 
-  // 상태별 포지션 분류
-  const allPositions: Position[] = status ? Object.values(status.positions) : [];
+  // 상태별 포지션 분류 (DB 데이터와 엔진 상태 병합)
+  const dbPositions: Position[] = tradingStocks.map(stock => {
+    const enginePos = status?.positions[stock.code];
+    if (enginePos) {
+      // is_nxt: DB 값을 우선 사용 (DB가 true면 true, 아니면 엔진 값 사용)
+      const is_nxt = stock.is_nxt === true || enginePos.is_nxt === true;
+      console.log(`[NXT Debug] ${stock.code} - DB: ${stock.is_nxt}, Engine: ${enginePos.is_nxt}, Final: ${is_nxt}`);
+      return {
+        ...enginePos,
+        is_nxt: is_nxt,
+        market: enginePos.market || stock.market
+      };
+    }
+    // 엔진에 아직 없는 경우 (추가 직후 등) 가상 포지션 생성
+    console.log(`[NXT Debug] ${stock.code} - DB only: ${stock.is_nxt}`);
+    return {
+      code: stock.code,
+      name: stock.name,
+      state: 'WATCHING', // 기본 상태
+      prev_close: stock.basePrice,
+      entry_price: 0,
+      current_price: stock.currentPrice || stock.basePrice,
+      quantity: 0,
+      unrealized_pnl: 0,
+      unrealized_pnl_rate: 0,
+      order_id: '',
+      pending_quantity: 0,
+      gap_confirms: 0,
+      entry_time: '',
+      exit_time: '',
+      exit_reason: '',
+      error_message: '',
+      retry_count: 0,
+      is_nxt: stock.is_nxt === true,
+      market: stock.market
+    };
+  });
+
+  // 엔진에는 있지만 DB에는 없는 종목들 (삭제 후 처리 중인 종목 등)
+  const extraPositions = status 
+    ? Object.values(status.positions).filter(p => !tradingStocks.some(s => s.code === (p as Position).code)) 
+    : [];
+
+  const allPositions: Position[] = [...dbPositions, ...(extraPositions as Position[])];
+
   const activePositions = allPositions.filter(p => p.state === 'ENTERED');
   const watchingPositions = allPositions.filter(p => p.state === 'WATCHING');
   const pendingPositions = allPositions.filter(p => p.state.includes('PENDING'));
@@ -1922,9 +1968,10 @@ export const AutoTradingPage: React.FC<AutoTradingPageProps> = ({ initialStocks,
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-2">
                           <div className="font-bold text-white">{pos.name || pos.code}</div>
-                          {nxtLoaded && isNxtStock(pos.code) && (
-                            <span className="flex items-center gap-0.5 px-1 py-0.5 bg-indigo-500/20 text-indigo-400 text-[8px] font-bold rounded" title="NXT(야간거래) 가능">
-                              <Moon className="w-2 h-2" />NXT
+                          {/* NXT 뱃지 - is_nxt가 true이면 표시 */}
+                          {pos.is_nxt === true && (
+                            <span className="flex items-center gap-0.5 px-1.5 py-0.5 bg-indigo-500/30 text-indigo-300 text-[10px] font-bold rounded border border-indigo-500/50" title="NXT(야간거래) 가능">
+                              <Moon className="w-3 h-3" />NXT
                             </span>
                           )}
                         </div>

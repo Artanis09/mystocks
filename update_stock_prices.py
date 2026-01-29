@@ -119,38 +119,108 @@ def is_nxt_stock(code: str) -> bool:
 def check_nxt_from_kis_api(code: str) -> bool | None:
     """KIS API를 통해 실제 NXT 거래 가능 여부 확인
     
-    FHKST01010100 (주식현재가 시세) API의 nxt_trd_psbl_yn 필드 사용
+    [국내주식] 종목정보 > 주식기본조회 (CTPF1002R) API 사용
+    cptt_trad_tr_psbl_yn: NXT 거래 가능 여부
     
-    참고: 2025년 3월 이후 KIS API에 nxt_trd_psbl_yn 필드가 추가됨.
-    필드가 없는 경우 None을 반환하여 기존 캐시 사용하도록 함
-    
-    Returns:
-        True: NXT 가능 (API 확인)
-        False: NXT 불가 (API 확인)  
-        None: API에서 필드를 찾을 수 없음 (캐시 사용 필요)
+    NOTE: 이 API는 실전투자 전용이므로 실전투자 도메인을 직접 사용합니다.
     """
     code = str(code).zfill(6)
     try:
-        params = {
-            "fid_cond_mrkt_div_code": "J",
-            "fid_input_iscd": code
+        import requests
+        
+        # 실전투자 키 사용 (NXT 정보는 실전투자 API에서만 제공)
+        real_app_key = os.getenv("KIS_REAL_APP_KEY", os.getenv("KIS_APP_KEY", "")).strip()
+        real_app_secret = os.getenv("KIS_REAL_APP_SECRET", os.getenv("KIS_APP_SECRET", "")).strip()
+        real_token_file = "kis_token_real.json"
+        
+        # 실전투자 토큰 로드
+        access_token = None
+        if os.path.exists(real_token_file):
+            try:
+                with open(real_token_file, 'r', encoding='utf-8') as f:
+                    token_data = json.load(f)
+                    if token_data.get('expired_time', 0) > datetime.now().timestamp():
+                        access_token = token_data.get('access_token')
+            except:
+                pass
+        
+        # 토큰이 없으면 새로 발급
+        if not access_token:
+            token_url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+            token_headers = {"content-type": "application/json"}
+            token_body = {
+                "grant_type": "client_credentials",
+                "appkey": real_app_key,
+                "appsecret": real_app_secret
+            }
+            resp = requests.post(token_url, headers=token_headers, json=token_body, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                access_token = data.get("access_token")
+                # 토큰 저장
+                with open(real_token_file, 'w', encoding='utf-8') as f:
+                    json.dump({
+                        'access_token': access_token,
+                        'expired_time': datetime.now().timestamp() + data.get("expires_in", 86400)
+                    }, f)
+            else:
+                print(f"실전투자 토큰 발급 실패: {resp.status_code}")
+                return None
+        
+        # 실전투자 도메인으로 API 호출
+        url = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/search-stock-info"
+        params = {"PDNO": code, "PRDT_TYPE_CD": "300"}
+        headers = {
+            "content-type": "application/json; charset=utf-8",
+            "authorization": f"Bearer {access_token}",
+            "appkey": real_app_key,
+            "appsecret": real_app_secret,
+            "tr_id": "CTPF1002R",
+            "custtype": "P"
         }
-        result = call_kis_api("/uapi/domestic-stock/v1/quotations/inquire-price", params, "FHKST01010100")
+        
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        if response.status_code != 200:
+            print(f"NXT API 응답 오류: {response.status_code}")
+            return None
+            
+        result = response.json()
         output = result.get("output", {})
         
-        # nxt_trd_psbl_yn: "Y" = NXT 거래 가능, "N" = 불가
-        # 필드가 없는 경우 None 반환
-        nxt_flag = output.get("nxt_trd_psbl_yn", None)
+        # output이 리스트인 경우 첫 번째 항목 사용
+        if isinstance(output, list) and len(output) > 0:
+            output = output[0]
+            
+        # cptt_trad_tr_psbl_yn: "Y" = NXT 거래 가능, "N" = 불가
+        nxt_flag = output.get("cptt_trad_tr_psbl_yn", None)
         
         if nxt_flag is not None:
-            return nxt_flag == "Y"
+            is_nxt = nxt_flag == "Y"
+            print(f"[NXT 조회] {code}: cptt_trad_tr_psbl_yn={nxt_flag} -> is_nxt={is_nxt}")
+            return is_nxt
         
-        # nxt_trd_psbl_yn 필드가 없는 경우: None 반환 (캐시 사용)
+        # 백업: 상품기본조회(CTPF1604R)
+        url2 = "https://openapi.koreainvestment.com:9443/uapi/domestic-stock/v1/quotations/search-info"
+        headers["tr_id"] = "CTPF1604R"
+        response2 = requests.get(url2, headers=headers, params=params, timeout=10)
+        if response2.status_code == 200:
+            result2 = response2.json()
+            output2 = result2.get("output", {})
+            if isinstance(output2, list) and len(output2) > 0:
+                output2 = output2[0]
+            nxt_flag2 = output2.get("cptt_trad_tr_psbl_yn", None)
+            if nxt_flag2 is not None:
+                is_nxt = nxt_flag2 == "Y"
+                print(f"[NXT 조회-백업] {code}: cptt_trad_tr_psbl_yn={nxt_flag2} -> is_nxt={is_nxt}")
+                return is_nxt
+        
         return None
         
     except Exception as e:
         print(f"NXT 확인 실패 for {code}: {e}")
-        return None  # fallback to cache
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def update_nxt_cache_for_code(code: str) -> bool:
@@ -841,6 +911,7 @@ class Recommendation(db.Model):
     probability = db.Column(db.Float, default=0)
     expected_return = db.Column(db.Float, default=0)
     market_cap = db.Column(db.Float, default=0)
+    is_nxt = db.Column(db.Boolean, default=False)  # NXT 거래 가능 여부
     created_at = db.Column(db.String(50), nullable=False)
 
 # 포트폴리오 일간 수익률 히스토리 (캐싱용)
@@ -875,6 +946,7 @@ class AutoTradingTargetStock(db.Model):
     source = db.Column(db.String(50), nullable=True)  # 출처 (ai_model1, ai_model2, ai_both, manual)
     probability = db.Column(db.Float, nullable=True)  # 확률
     model_name = db.Column(db.String(50), nullable=True)  # 모델명
+    is_nxt = db.Column(db.Boolean, default=False)  # NXT 거래 가능 여부
     added_date = db.Column(db.String(50), nullable=False)  # 추가일시
     
 
@@ -933,6 +1005,16 @@ def init_db():
             if 'model_name' not in cols:
                 cur.execute("ALTER TABLE recommendation ADD COLUMN model_name TEXT DEFAULT 'model1'")
                 conn.commit()
+            if 'is_nxt' not in cols:
+                cur.execute("ALTER TABLE recommendation ADD COLUMN is_nxt BOOLEAN DEFAULT 0")
+                conn.commit()
+            
+            # auto_trading_target_stock 마이그레이션
+            cur.execute("PRAGMA table_info(auto_trading_target_stock)")
+            target_cols = {row[1] for row in cur.fetchall()}
+            if 'is_nxt' not in target_cols:
+                cur.execute("ALTER TABLE auto_trading_target_stock ADD COLUMN is_nxt BOOLEAN DEFAULT 0")
+                conn.commit()
         except Exception as e:
             print(f"[WARN] DB migration failed: {e}")
         finally:
@@ -940,11 +1022,33 @@ def init_db():
                 conn.close()
             except Exception:
                 pass
+
+        # 기존 종목 NXT 상태 업데이트 (False인 경우만 재확인하여 누락 방지)
+        try:
+            targets = AutoTradingTargetStock.query.filter_by(is_nxt=False).all()
+            if targets:
+                print(f"[Init] Refreshing NXT status for {len(targets)} stocks...")
+                for t in targets:
+                    api_result = check_nxt_from_kis_api(t.code)
+                    if api_result is True:
+                        t.is_nxt = True
+                        print(f"  - {t.name}({t.code}): NXT 지원 확인됨")
+                db.session.commit()
+        except Exception as e:
+            print(f"[WARN] NXT status refresh failed: {e}")
+
         print("데이터베이스 초기화 완료")
 
 # 한국투자증권 API 설정
-APP_KEY = os.getenv("KIS_APP_KEY")
-APP_SECRET = os.getenv("KIS_APP_SECRET")
+APP_KEY = os.getenv("KIS_APP_KEY", "").strip()
+APP_SECRET = os.getenv("KIS_APP_SECRET", "").strip()
+KIS_URL = os.getenv("KIS_URL", "https://openapivts.koreainvestment.com:29443").strip()
+
+# 실전투자 키가 있으면 실전투자 도메인 사용
+REAL_APP_KEY = os.getenv("KIS_REAL_APP_KEY", "").strip()
+if APP_KEY == REAL_APP_KEY and APP_KEY != "":
+    KIS_URL = "https://openapi.koreainvestment.com:9443"
+
 ACCESS_TOKEN = None
 TOKEN_FILE = "kis_token.json"
 
@@ -988,7 +1092,7 @@ def get_kis_access_token():
                 return ACCESS_TOKEN
     
     # 새 토큰 발급
-    url = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+    url = f"{KIS_URL}/oauth2/tokenP"
     headers = {"content-type": "application/json"}
     body = {
         "grant_type": "client_credentials",
@@ -1031,7 +1135,7 @@ def call_kis_api(endpoint, params=None, tr_id="FHKST01010100"):
     token = get_kis_access_token()
     if not token:
         return {}
-    url = f"https://openapi.koreainvestment.com:9443{endpoint}"
+    url = f"{KIS_URL}{endpoint}"
     headers = {
         "content-type": "application/json; charset=utf-8",
         "authorization": f"Bearer {token}",
@@ -2357,6 +2461,7 @@ def get_recommendations():
                 'probability': rec.probability,
                 'expected_return': rec.expected_return,
                 'market_cap': rec.market_cap,
+                'is_nxt': getattr(rec, 'is_nxt', False),
                 'return_rate': profit_rate,
                 'price_source': price_source  # 프론트엔드에서 실시간 여부 표시용
             })
@@ -2491,6 +2596,9 @@ def update_recommendations():
             for _, row in top_candidates.iterrows():
                 code = str(row['code']).zfill(6)
                 name = name_map.get(code, code)
+                
+                # NXT 거래 가능 여부 확인 (생성 시점에 일회성 조회)
+                nxt_available = check_nxt_from_kis_api(code) or False
 
                 rec = Recommendation(
                     date=base_date_str,
@@ -2502,6 +2610,7 @@ def update_recommendations():
                     probability=float(row['positive_proba']),
                     expected_return=float(row['expected_return']),
                     market_cap=float(row['market_cap']),
+                    is_nxt=nxt_available,
                     created_at=now_ts,
                 )
                 db.session.add(rec)
@@ -4382,6 +4491,10 @@ def run_inference_for_models():
                         prob = row.get('positive_proba', 0) * 100
                         vol_ratio = row.get('volume_ratio_5d', 0) * 100
                         model_stocks.append(f"{name}({prob:.0f}%,거{vol_ratio:.0f}%)")
+                        
+                        # NXT 거래 가능 여부 확인
+                        nxt_available = check_nxt_from_kis_api(code) or False
+
                         rec = Recommendation(
                             date=base_date_str,
                             filter_tag='filter2',
@@ -4392,6 +4505,7 @@ def run_inference_for_models():
                             probability=float(row['positive_proba']),
                             expected_return=float(row['expected_return']),
                             market_cap=float(row['market_cap']),
+                            is_nxt=nxt_available,
                             created_at=now_ts,
                         )
                         db.session.add(rec)
@@ -6047,6 +6161,7 @@ def api_get_target_stocks():
                 'source': s.source,
                 'probability': s.probability,
                 'modelName': s.model_name,
+                'is_nxt': getattr(s, 'is_nxt', False),
                 'addedDate': s.added_date,
             })
         return jsonify({"success": True, "stocks": result})
@@ -6077,6 +6192,11 @@ def api_add_target_stocks():
             market_cap = stock.get('marketCap', 0) or 0
             
             # 1. DB에 저장 (백업용)
+            is_nxt = stock.get('is_nxt')
+            if is_nxt is None:
+                # 전달되지 않은 경우(수동 추가 등) 직접 조회
+                is_nxt = check_nxt_from_kis_api(code) or False
+
             existing = AutoTradingTargetStock.query.filter_by(code=code).first()
             if existing:
                 existing.name = name
@@ -6086,6 +6206,7 @@ def api_add_target_stocks():
                 existing.source = stock.get('source')
                 existing.probability = stock.get('probability')
                 existing.model_name = stock.get('modelName')
+                existing.is_nxt = is_nxt
             else:
                 new_stock = AutoTradingTargetStock(
                     code=code,
@@ -6096,6 +6217,7 @@ def api_add_target_stocks():
                     source=stock.get('source'),
                     probability=stock.get('probability'),
                     model_name=stock.get('modelName'),
+                    is_nxt=is_nxt,
                     added_date=stock.get('addedDate', datetime.now().isoformat()),
                 )
                 db.session.add(new_stock)
@@ -6111,7 +6233,8 @@ def api_add_target_stocks():
                     prev_high=0.0,
                     change_rate=0.0,
                     market_cap=market_cap,
-                    added_date=datetime.now().strftime('%Y-%m-%d')
+                    added_date=datetime.now().strftime('%Y-%m-%d'),
+                    is_nxt=is_nxt
                 )
                 engine.state.universe.append(universe_stock)
                 added_count += 1
@@ -6123,7 +6246,8 @@ def api_add_target_stocks():
                     name=name,
                     state=PositionState.WATCHING,
                     prev_close=base_price,
-                    market_cap=market_cap
+                    market_cap=market_cap,
+                    is_nxt=is_nxt
                 )
         
         db.session.commit()
