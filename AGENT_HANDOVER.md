@@ -48,6 +48,26 @@
 *   **동작 모드:** `.env` 파일의 `KIS_MOCK` 값이나 DB 설정을 통해 모의/실전 모드 전환 가능.
 *   **API 제한:** 토큰 발급은 1분당 1회 제한이 엄격함. 오류 발생 시 즉시 재시도하지 말고 최소 1분 이상의 간격을 두어야 함.
 *   **자산 조회:** 휴장일에는 API 필드에 따라 일부 값이 0으로 올 수 있으나, 현재 보강된 로직은 순자산(`nass_amt`)을 참조하여 0원 표기 문제를 방지함.
+
+## 3. 한국투자 코딩도우미 MCP 활용 (2026-01-30 추가)
+
+한국투자증권 Open API(KIS API) 개발을 보조하는 MCP(Model Context Protocol) 서버가 설치되었습니다. 차후 KIS API를 사용한 구현 시 다음 도구들을 적극 활용하십시오.
+
+*   **MCP 도구 목록:**
+    - `mcp_search_domestic_stock_api`: 국내주식 API 검색
+    - `mcp_search_overseas_stock_api`: 해외주식 API 검색
+    - `mcp_search_domestic_futureoption_api`: 국내선물옵션 API 검색
+    - `mcp_read_source_code`: 검색된 API의 실제 코드 템플릿 가져오기
+    - (기타 채권, ELW, ETF/ETN, 인증 관련 검색 도구 포함)
+
+*   **권장 작업 흐름:**
+    1. `mcp_search_*` 도구를 사용하여 필요한 기능(예: "현재가 조회", "주문") 검색.
+    2. 결과의 `url_main`을 확인하고 `mcp_read_source_code`를 호출하여 구현 코드(Python) 획득.
+    3. 획득한 코드를 프로젝트의 `.env` 환경 변수 구성에 맞춰 수정하여 적용.
+    4. `.env` 변수는 `KIS_REAL_APP_KEY`, `KIS_APP_KEY`, `KIS_MOCK` 등을 사용하여 실전/모의를 구분하도록 설정되어 있음.
+
+*   **참고 스크립트:**
+    - `mystocks/scripts/run_mcp_kis.sh`: 로컬에서 MCP 서버를 실행할 때 환경 변수를 주입하는 셸 스크립트.
 *   **NXT 기능:** NXT 종목 데이터가 없으면 `POST /api/nxt/init-default`로 초기화 필요.
 
 ## 3. 향후 작업 제안 (Pending Tasks)
