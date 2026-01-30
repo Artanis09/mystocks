@@ -4192,7 +4192,7 @@ def format_ai_recommendation_message(model_name: str, stocks_data: list, is_manu
         포맷팅된 메시지 문자열
     """
     mode_str = "수동" if is_manual else "자동"
-    model_display = "Model1" if model_name == "model1" else "Model2(LightGBM)"
+    model_display = "모델1" if model_name == "model1" else "모델5(LightGBM)"
     
     lines = [
         f"📊 {model_display} {mode_str} 예측 완료",
@@ -4524,7 +4524,7 @@ def run_inference_for_models():
         
         all_stocks_data = []  # 모든 모델의 추천 종목 수집
         
-        for model_name in ['모델1', '모델5']:
+        for model_name in ['model1', 'model5']:
             print(f"[Scheduler] Running inference for {model_name}...")
             top_candidates = run_inference(
                 model_path=None,
