@@ -335,6 +335,12 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
         const processed = Array.from(uniqueMap.values());
         setRecommendationsByFilter(prev => ({ ...prev, [filterTag]: processed }));
         
+        // 모든 추천 종목의 현재가를 일괄 조회 (장중에만)
+        if (isMarketHours() && processed.length > 0) {
+          const allCodes = [...new Set(processed.map(s => s.code))];
+          fetchAllRecommendationPrices(allCodes);
+        }
+        
         // 오늘 날짜는 기본 펼침
         setExpandedDates(prev => {
           const newSet = new Set(prev);
@@ -357,6 +363,12 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
           }));
           setRecommendationsByFilter(prev => ({ ...prev, [filterTag]: processed }));
           
+          // 모든 추천 종목의 현재가를 일괄 조회 (장중에만)
+          if (isMarketHours() && processed.length > 0) {
+            const allCodes = [...new Set(processed.map((s: any) => s.code))];
+            fetchAllRecommendationPrices(allCodes);
+          }
+          
           // 오늘 날짜는 기본 펼침
           setExpandedDates(prev => {
             const newSet = new Set(prev);
@@ -374,6 +386,40 @@ export const Recommendations: React.FC<RecommendationsProps> = ({ onStockClick }
     }
   };
 
+  // 모든 추천 종목의 현재가를 일괄 조회 (초기 로드 시)
+  const fetchAllRecommendationPrices = useCallback(async (allCodes: string[]) => {
+    if (allCodes.length === 0) return;
+    
+    // 최대 50개씩 나눠서 조회
+    const batchSize = 50;
+    const batches = [];
+    for (let i = 0; i < allCodes.length; i += batchSize) {
+      batches.push(allCodes.slice(i, i + batchSize));
+    }
+    
+    const allPrices: Record<string, { current_price: number; change_percent: number }> = {};
+    
+    for (const batch of batches) {
+      try {
+        const response = await fetch(`${API_BASE_URL}/realtime-prices`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ codes: batch })
+        });
+        if (response.ok) {
+          const data = await response.json();
+          Object.assign(allPrices, data);
+        }
+      } catch (err) {
+        console.error('Failed to fetch recommendation prices batch:', err);
+      }
+    }
+    
+    if (Object.keys(allPrices).length > 0) {
+      setRealtimePrices(prev => ({ ...prev, ...allPrices }));
+    }
+  }, []);
+  
   // 실시간 가격 조회 (보이는 종목만, 장 운영시간에만)
   const fetchRealtimePrices = useCallback(async () => {
     // 장외 시간 (20:00 ~ 08:00)에는 실시간 조회 안함

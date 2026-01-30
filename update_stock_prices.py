@@ -2620,29 +2620,36 @@ def update_recommendations():
             
         db.session.commit()
 
-        # 알림 전송
-        for filter_tag, info in summary.items():
-            if info.get("count", 0) > 0:
-                stocks_list = [Recommendation.query.filter_by(date=info["date"], filter_tag=filter_tag, model_name=model_name).all()]
-                # 위 방식은 세션 관리상 위험하므로 names를 루프 안에서 수집
-                pass 
-        
-        # 다시 작성 (루프 안에서 수집하도록)
-        notification_msg = []
+        # 알림 전송 - 새로운 포맷 사용
         for filter_tag, top_candidates in results_by_filter.items():
             if top_candidates is not None and not top_candidates.empty:
-                model_stocks = []
+                stocks_data = []
                 for _, row in top_candidates.iterrows():
                     code = str(row['code']).zfill(6)
                     name = name_map.get(code, code)
-                    prob = row.get('positive_proba', 0) * 100
-                    vol_ratio = row.get('volume_ratio_5d', 0) * 100
-                    model_stocks.append(f"{name}({prob:.0f}%,거{vol_ratio:.0f}%)")
-                if model_stocks:
-                    notification_msg.append(f"[{model_name}] 수동 예측 완료: {', '.join(model_stocks)}")
-        
-        if notification_msg:
-            send_ntfy_notification("\n".join(notification_msg), topic="wayne-predmodelstocks")
+                    stocks_data.append({
+                        'name': name,
+                        'code': code,
+                        'prob': row.get('positive_proba', 0) * 100,
+                        'vol_ratio': row.get('volume_ratio_5d', 0) * 100,
+                        'expected_return': row.get('expected_return', 0)
+                    })
+                
+                if stocks_data:
+                    # 보기 좋게 포맷팅된 메시지 생성
+                    formatted_msg = format_ai_recommendation_message(
+                        model_name=model_name,
+                        stocks_data=stocks_data,
+                        is_manual=True
+                    )
+                    # AI 추천 아이콘 태그와 함께 전송
+                    send_ntfy_notification(
+                        formatted_msg, 
+                        topic="wayne-predmodelstocks",
+                        title="AI Stock Recommendation",
+                        tags=["robot", "chart_with_upwards_trend"],
+                        priority="high"
+                    )
 
         return jsonify({"message": "Prediction complete", "summary": summary})
         
@@ -4136,22 +4143,83 @@ def check_network_and_retry(max_retries: int = 3, delay: int = 10) -> bool:
     return False
 
 
-def send_ntfy_notification(message, topic="wayne-akdlrjf0924"):
-    """ntfy.sh를 통해 알림 전송"""
+def send_ntfy_notification(message, topic="wayne-akdlrjf0924", title=None, tags=None, priority="default"):
+    """ntfy.sh를 통해 알림 전송
+    
+    Args:
+        message: 알림 메시지 본문
+        topic: ntfy 토픽
+        title: 알림 제목 (기본: MyStocks Notification)
+        tags: 이모지 태그 리스트 (예: ["robot", "chart_with_upwards_trend"])
+        priority: 알림 우선순위 (min, low, default, high, urgent)
+    """
     print(f"[Ntfy] Attempting to send message: {message[:50]}... (Topic: {topic})")
     try:
         topic_url = f"https://ntfy.sh/{topic}"
-        # 헤더에 한글이 포함되면 latin-1 인코딩 에러가 발생하므로 제거하거나 인코딩 필요
+        
+        headers = {
+            "Priority": priority
+        }
+        
+        # Title 설정 (ASCII만 헤더에 사용 가능하므로 본문에 포함)
+        if title:
+            headers["Title"] = title.encode('utf-8').decode('latin-1', errors='ignore')
+        else:
+            headers["Title"] = "MyStocks Notification"
+        
+        # Tags (이모지) 설정 - ntfy는 태그로 이모지 아이콘 표시
+        if tags:
+            headers["Tags"] = ",".join(tags)
+            
         resp = requests.post(topic_url, 
                       data=message.encode('utf-8'),
-                      headers={
-                          "Title": "MyStocks Notification", # ASCII 가능하도록 변경
-                          "Priority": "default"
-                      },
+                      headers=headers,
                       timeout=10)
         print(f"[Ntfy] Notification sent! Status: {resp.status_code}")
     except Exception as e:
         print(f"[Ntfy] Notification failed: {e}")
+
+
+def format_ai_recommendation_message(model_name: str, stocks_data: list, is_manual: bool = True) -> str:
+    """AI 추천 종목 알림 메시지를 보기 좋게 포맷팅
+    
+    Args:
+        model_name: 모델명 (model1, model5)
+        stocks_data: [{'name': str, 'code': str, 'prob': float, 'vol_ratio': float, 'expected_return': float}, ...]
+        is_manual: 수동 예측 여부
+    
+    Returns:
+        포맷팅된 메시지 문자열
+    """
+    mode_str = "수동" if is_manual else "자동"
+    model_display = "Model1" if model_name == "model1" else "Model2(LightGBM)"
+    
+    lines = [
+        f"📊 {model_display} {mode_str} 예측 완료",
+        f"━━━━━━━━━━━━━━━━━━━━━━",
+    ]
+    
+    for i, stock in enumerate(stocks_data, 1):
+        name = stock.get('name', 'Unknown')
+        code = stock.get('code', '')
+        prob = stock.get('prob', 0)
+        vol_ratio = stock.get('vol_ratio', 0)
+        exp_ret = stock.get('expected_return', 0) * 100  # 기대수익률 %
+        
+        # 확률에 따른 별표
+        stars = "⭐" if prob >= 90 else "☆" if prob >= 80 else ""
+        
+        lines.append(
+            f"{i}. {stars}{name} ({code})"
+        )
+        lines.append(
+            f"   확률 {prob:.0f}% | 기대 +{exp_ret:.1f}% | 거래량 {vol_ratio:.0f}%"
+        )
+    
+    lines.append(f"━━━━━━━━━━━━━━━━━━━━━━")
+    lines.append(f"🕐 {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+    
+    return "\n".join(lines)
 
 
 @app.route('/api/test-notification', methods=['GET'])
@@ -4454,7 +4522,9 @@ def run_inference_for_models():
         from ml.inference import get_stock_name_mapping
         name_map = get_stock_name_mapping()
         
-        for model_name in ['model1', 'model5']:
+        all_stocks_data = []  # 모든 모델의 추천 종목 수집
+        
+        for model_name in ['모델1', '모델5']:
             print(f"[Scheduler] Running inference for {model_name}...")
             top_candidates = run_inference(
                 model_path=None,
@@ -4475,7 +4545,7 @@ def run_inference_for_models():
                 else:
                     base_date_str = str(base_date_val)[:10]
                 
-                model_stocks = []
+                stocks_data_for_model = []
                 with app.app_context():
                     # 중복 제거
                     Recommendation.query.filter_by(
@@ -4488,9 +4558,15 @@ def run_inference_for_models():
                     for _, row in top_candidates.iterrows():
                         code = str(row['code']).zfill(6)
                         name = name_map.get(code, code)
-                        prob = row.get('positive_proba', 0) * 100
-                        vol_ratio = row.get('volume_ratio_5d', 0) * 100
-                        model_stocks.append(f"{name}({prob:.0f}%,거{vol_ratio:.0f}%)")
+                        
+                        # 알림용 데이터 수집
+                        stocks_data_for_model.append({
+                            'name': name,
+                            'code': code,
+                            'prob': row.get('positive_proba', 0) * 100,
+                            'vol_ratio': row.get('volume_ratio_5d', 0) * 100,
+                            'expected_return': row.get('expected_return', 0)
+                        })
                         
                         # NXT 거래 가능 여부 확인
                         nxt_available = check_nxt_from_kis_api(code) or False
@@ -4512,15 +4588,24 @@ def run_inference_for_models():
                     
                     db.session.commit()
                     print(f"[Scheduler] {model_name} inference saved: {len(top_candidates)} stocks for {base_date_str}")
-                    
-                if model_stocks:
-                    notification_msg.append(f"[{model_name}] 추천: {', '.join(model_stocks)}")
+                
+                # 각 모델별 알림 전송 (보기 좋은 포맷)
+                if stocks_data_for_model:
+                    formatted_msg = format_ai_recommendation_message(
+                        model_name=model_name,
+                        stocks_data=stocks_data_for_model,
+                        is_manual=False  # 자동 예측
+                    )
+                    send_ntfy_notification(
+                        formatted_msg,
+                        topic="wayne-predmodelstocks",
+                        title="AI Stock Recommendation",
+                        tags=["robot", "chart_with_upwards_trend"],
+                        priority="high"
+                    )
         
         with _scheduler_lock:
             _scheduler_state["inference_done_today"] = True
-        
-        if notification_msg:
-            send_ntfy_notification("\n".join(notification_msg), topic="wayne-predmodelstocks")
             
         print("[Scheduler] All inference completed.")
         
